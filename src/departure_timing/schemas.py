@@ -16,8 +16,9 @@ class CamelModel(BaseModel):
 class AssessDepartureRequest(CamelModel):
     station: str | None = Field(None, description="지하철역 이름", examples=["신대방역"])
     line: str | None = Field(None, description="호선", examples=["2호선"])
+    # station·line처럼 필수지만, 누락 시 호선별 안내가 담긴 도메인 오류 메시지를 주려고 모델에서는 선택으로 둔다.
     direction: str | None = Field(
-        None, description="상행/하행 (2호선은 내선/외선)", examples=["내선"]
+        None, description="필수. 상행/하행 (2호선은 내선/외선)", examples=["내선"]
     )
     estimated_time_to_station: int | None = Field(
         None, description="역까지 이동 시간(분)", examples=[10]

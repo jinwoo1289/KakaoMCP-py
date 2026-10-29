@@ -152,7 +152,7 @@ class SeoulArrivalClient:
             _seconds_to_minutes_ceil(row.barvl_dt)
             for row in rows
             if row.subway_id == target_subway_id
-            and (normalized_dir is None or normalized_dir == row.updn_line)
+            and row.updn_line == normalized_dir
         )
         live = sorted(m for m in minutes if m is not None and m > 0)[:MAX_ARRIVALS]
 

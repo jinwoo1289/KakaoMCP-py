@@ -51,7 +51,7 @@ class DepartureTimingService:
             raise InvalidInputError("line(호선)을 입력해 주세요.")
         if subway_id_for(request.line) is None:
             raise InvalidInputError(f"지원하지 않는 호선입니다: {request.line}")
-        # 호선과 맞지 않거나 알 수 없는 방향을 그대로 두면 반대 방향 열차가 섞인 판단이 나가므로 막는다.
+        # 방향이 없거나 호선과 맞지 않거나 알 수 없는 값이면 반대 방향 열차가 섞인 판단이 나가므로 막는다.
         resolve_direction(request.direction, request.line)
         estimated = self._resolve_estimated_time(request)
 

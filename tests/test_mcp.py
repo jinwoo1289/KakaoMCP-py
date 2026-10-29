@@ -29,7 +29,8 @@ JAVA_TOOLS = {
             "direction": ("string", "상행/하행 (2호선은 내선/외선)"),
             "presetName": ("string", "저장된 이동 시간 프리셋 이름"),
         },
-        ["station", "line"],
+        # 의도적으로 Java(["station", "line"])와 다르다: 방향을 생략하면 양방향 열차가 섞여 판단이 틀리므로 필수로 바꿨다.
+        ["station", "line", "direction"],
     ),
     "save_preset": (
         {
@@ -40,7 +41,7 @@ JAVA_TOOLS = {
     ),
 }
 
-ASSESS = {"station": "서울역", "line": "1호선", "estimatedTimeToStation": 4}
+ASSESS = {"station": "서울역", "line": "1호선", "direction": "상행", "estimatedTimeToStation": 4}
 
 
 @pytest.fixture
@@ -116,7 +117,8 @@ async def test_save_preset_then_assess_with_preset(mcp):
     assert saved.structured_content == {"success": True, "message": "프리셋 'home' 저장 완료"}
 
     result = await mcp.call_tool(
-        "assess_departure_timing", {"station": "서울역", "line": "1호선", "presetName": "home"}
+        "assess_departure_timing",
+        {"station": "서울역", "line": "1호선", "direction": "상행", "presetName": "home"},
     )
     assert result.structured_content["decision"] == "GO_NOW"
 
@@ -155,9 +157,10 @@ async def test_domain_input_errors_are_tool_errors(mcp, tool, arguments, reason)
     ("arguments", "field"),
     [
         ({"station": "서울역"}, "line"),
+        ({"station": "서울역", "line": "2호선"}, "direction"),
         ({**ASSESS, "estimatedTimeToStation": "abc"}, "estimatedTimeToStation"),
     ],
-    ids=["missing-required", "wrong-type"],
+    ids=["missing-required", "missing-direction", "wrong-type"],
 )
 async def test_schema_violations_are_tool_errors_per_spec(mcp, arguments, field):
     # MCP 규격은 입력 검증 오류를 도구 실행 오류로 분류한다(모델이 고쳐서 다시 시도할 수 있도록).
@@ -238,7 +241,10 @@ def test_presets_are_shared_between_rest_and_mcp(service):
             "/mcp",
             json=rpc(
                 "tools/call",
-                {"name": "assess_departure_timing", "arguments": {"station": "서울역", "line": "1", "presetName": "home"}},
+                {
+                    "name": "assess_departure_timing",
+                    "arguments": {"station": "서울역", "line": "1", "direction": "상행", "presetName": "home"},
+                },
             ),
             headers=MCP_HEADERS,
         )

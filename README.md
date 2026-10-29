@@ -65,7 +65,7 @@ curl -X POST http://localhost:8000/presets \
 |---|---|---|
 | `station` | string | 역 이름 (필수, 예: `신대방역`) |
 | `line` | string | 호선 (필수, 예: `2호선`, `2`, `신분당선`) |
-| `direction` | string | `상행`/`하행` (2호선은 `내선`/`외선`, 생략 가능) |
+| `direction` | string | 방향 (필수, `상행`/`하행`, 2호선은 `내선`/`외선`) |
 | `estimatedTimeToStation` | int | 역까지 이동 시간(분) |
 | `presetName` | string | 저장된 프리셋. 있으면 `estimatedTimeToStation`보다 우선 |
 | `currentTime` | `HH:mm` | 현재 시각 (생략하면 서버의 한국 시각) |
@@ -114,10 +114,11 @@ curl -X POST http://localhost:8000/departure/assess \
 ### 도구
 
 이름과 입력 스키마(속성 이름, 타입, 설명, 필수 항목)는 Java 버전과 같습니다.
+단, `assess_departure_timing`의 `direction`은 설명을 보완하고 필수로 바꿨습니다(아래 "방향 값을 검증해…" 참고).
 
 | 도구 | 입력 | 필수 | 결과 |
 |---|---|---|---|
-| `assess_departure_timing` | `station`, `line`, `estimatedTimeToStation`(number), `direction`, `presetName` | `station`, `line` | `{decision, recommendedDepartureTime, reason}` |
+| `assess_departure_timing` | `station`, `line`, `estimatedTimeToStation`(number), `direction`, `presetName` | `station`, `line`, `direction` | `{decision, recommendedDepartureTime, reason}` |
 | `save_preset` | `presetName`, `estimatedTimeToStation`(number) | 둘 다 | `{success, message}` |
 
 결과는 REST 응답과 같은 JSON으로, `structuredContent`와 텍스트(JSON 문자열) 두 형태로 함께 돌려줍니다.
@@ -150,7 +151,7 @@ curl -X POST http://localhost:8000/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'MCP-Protocol-Version: 2025-06-18' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assess_departure_timing","arguments":{"station":"신대방역","line":"2호선","estimatedTimeToStation":10}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assess_departure_timing","arguments":{"station":"신대방역","line":"2호선","direction":"내선","estimatedTimeToStation":10}}}'
 ```
 
 ```json
@@ -241,7 +242,7 @@ Java 버전은 재시도 없이 바로 가짜 데이터로 대체했습니다. �
 실제 호출에서도 강남역 2호선을 `내선`으로 물으면 `TOO_LATE`였는데, `상행`으로 물으면 내선·외선 열차가 섞여
 `WAIT 15:57`이 나왔습니다. 도구 설명도 "상행/하행"뿐이라 LLM이 2호선에 상행/하행을 넣기 쉬웠습니다.
 
-**수정:** 방향은 생략하거나 호선에 맞는 값만 받습니다. 그 밖의 값은 외부 API를 부르기 전에 입력 오류(REST `400`, MCP `[입력 오류]`)로 알립니다.
+**수정:** 방향을 필수로 바꾸고 호선에 맞는 값만 받습니다. 그 밖의 값은 외부 API를 부르기 전에 입력 오류(REST `400`, MCP `[입력 오류]`)로 알립니다.
 
 | 입력 | Java | Python |
 |---|---|---|
@@ -250,10 +251,14 @@ Java 버전은 재시도 없이 바로 가짜 데이터로 대체했습니다. �
 | 2호선 + `상행`/`하행` | 필터 끔(양방향 섞임) | 입력 오류 "2호선은 방향을 내선 또는 외선으로 입력해 주세요." |
 | 다른 호선 + `내선`/`외선` | 필터 끔(양방향 섞임) | 입력 오류 "{호선}은 방향을 상행 또는 하행으로 입력해 주세요." |
 | 인식할 수 없는 값(`왼쪽`, `강남 방면` 등) | 필터 끔(양방향 섞임) | 입력 오류 "알 수 없는 방향입니다: …" |
-| 생략(빈 문자열 포함) | 필터 없음 | 필터 없음 (Java와 같음) |
+| 생략(빈 문자열 포함) | 필터 없음(양방향 섞임) | 입력 오류 "방향(direction)이 필요합니다. …" |
 
 - 상행↔내선 같은 변환은 하지 않습니다. 2호선의 상행이 내선인지 외선인지는 역마다 다르기 때문입니다.
-- 도구 설명(MCP, REST)을 "상행/하행 (2호선은 내선/외선)"으로 보완했습니다. Java 도구 설명과 다른 유일한 항목입니다.
+- 도구 설명(MCP, REST)을 "상행/하행 (2호선은 내선/외선)"으로 보완했습니다.
+- **방향을 필수로 바꾼 이유:** 생략해도 반대 방향 열차가 섞이는 같은 문제가 생기고, "어느 열차를 탈지"는 방향 없이는 판단할 수 없습니다.
+  Java 스키마(`required: [station, line]`)와 달라지므로, `direction`을 보내지 않던 기존 클라이언트는 입력 오류를 받습니다.
+  MCP에서는 오류 메시지에 호선별로 유효한 값이 들어 있어 LLM이 사용자에게 방향을 물어 다시 호출할 수 있습니다.
+  MCP 스키마의 `required`에도 넣었으므로 누락 시 메시지는 SDK 검증 형식(`[입력 오류] direction: Field required`)입니다.
 
 ### MCP: 공식 SDK를 쓰고, 오류를 규격대로 나눕니다
 

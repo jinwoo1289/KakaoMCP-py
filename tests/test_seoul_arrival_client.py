@@ -47,7 +47,7 @@ def test_filters_by_line_and_direction_and_converts_seconds_to_minutes():
 def test_keeps_at_most_five_sorted_arrivals():
     rows = [row("1001", "상행", str(sec)) for sec in (600, 60, 540, 120, 480, 180, 420)]
     client = client_with(responding(body(*rows)))
-    assert client.get_remaining_minutes("서울", "1", None) == [1, 2, 3, 7, 8]
+    assert client.get_remaining_minutes("서울", "1", "상행") == [1, 2, 3, 7, 8]
 
 
 def test_line2_filters_by_inner_outer_direction():
@@ -56,18 +56,19 @@ def test_line2_filters_by_inner_outer_direction():
     assert client.get_remaining_minutes("신대방", "2호선", "내선") == [2]
 
 
-def test_omitted_direction_uses_both_directions():
-    # 방향을 생략한 경우만 필터 없이 양방향 열차를 함께 본다 (Java와 같음).
-    client = client_with(responding(body(row("1002", "내선", "120"), row("1002", "외선", "240"))))
-    assert client.get_remaining_minutes("신대방", "2호선", None) == [2, 4]
-
-
 @pytest.mark.parametrize(
     ("line", "direction"),
-    [("2호선", "상행"), ("2호선", "왼쪽"), ("7호선", "외선"), ("7호선", "강남 방면")],
+    [
+        ("2호선", None),
+        ("2호선", "상행"),
+        ("2호선", "왼쪽"),
+        ("7호선", None),
+        ("7호선", "외선"),
+        ("7호선", "강남 방면"),
+    ],
 )
-def test_wrong_or_unknown_direction_raises_before_calling_api(line, direction):
-    # Java(및 이 클라이언트의 이전 버전)는 이런 값이면 방향 필터를 조용히 꺼서
+def test_omitted_wrong_or_unknown_direction_raises_before_calling_api(line, direction):
+    # Java(및 이 클라이언트의 이전 버전)는 방향이 없거나 이런 값이면 방향 필터를 조용히 꺼서
     # 반대 방향 열차까지 섞인 목록을 돌려줬다. 이제는 API를 부르기 전에 입력 오류로 막는다.
     requests = []
 
@@ -87,7 +88,7 @@ def test_request_url_uses_normalized_station():
         seen.append(unquote(request.url.path))
         return httpx.Response(200, text=body(row("1001", "상행", "120")))
 
-    client_with(handler).get_remaining_minutes("서울 역", "1호선", None)
+    client_with(handler).get_remaining_minutes("서울 역", "1호선", "상행")
     assert seen == ["/api/subway/KEY/xml/realtimeStationArrival/0/30/서울"]
 
 
@@ -101,7 +102,7 @@ def test_request_url_uses_normalized_station():
 def test_invalid_input_raises_instead_of_mock_arrivals(station, line):
     client = client_with(responding(body(row("1001", "상행", "120"))))
     with pytest.raises(InvalidInputError):
-        client.get_remaining_minutes(station, line, None)
+        client.get_remaining_minutes(station, line, "상행")
 
 
 @pytest.mark.parametrize(
@@ -117,26 +118,26 @@ def test_invalid_input_raises_instead_of_mock_arrivals(station, line):
 )
 def test_empty_or_error_response_raises_unavailable(text):
     with pytest.raises(ArrivalUnavailableError):
-        client_with(responding(text)).get_remaining_minutes("서울역", "1호선", None)
+        client_with(responding(text)).get_remaining_minutes("서울역", "1호선", "상행")
 
 
 def test_json_error_body_reports_api_error_code():
     # 실제 API는 키가 틀리면 XML 경로로 요청해도 HTTP 200 + JSON 오류 본문을 준다.
     text = '{"status":500,"code":"INFO-100","message":"인증키가 유효하지 않습니다.","total":0}'
     with pytest.raises(ArrivalUnavailableError, match="INFO-100"):
-        client_with(responding(text)).get_remaining_minutes("서울역", "1호선", None)
+        client_with(responding(text)).get_remaining_minutes("서울역", "1호선", "상행")
 
 
 def test_unusable_response_is_logged(caplog):
     with pytest.raises(ArrivalUnavailableError):
-        client_with(responding(body())).get_remaining_minutes("서울역", "1호선", None)
+        client_with(responding(body())).get_remaining_minutes("서울역", "1호선", "상행")
     assert any("response unusable" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize("status", [400, 403, 500, 503])
 def test_non_200_raises_unavailable(status):
     with pytest.raises(ArrivalUnavailableError, match=str(status)):
-        client_with(responding("", status)).get_remaining_minutes("서울역", "1호선", None)
+        client_with(responding("", status)).get_remaining_minutes("서울역", "1호선", "상행")
 
 
 @pytest.mark.parametrize(
@@ -149,4 +150,4 @@ def test_transport_failure_raises_unavailable(error):
         raise error
 
     with pytest.raises(ArrivalUnavailableError):
-        client_with(handler).get_remaining_minutes("서울역", "1호선", None)
+        client_with(handler).get_remaining_minutes("서울역", "1호선", "상행")

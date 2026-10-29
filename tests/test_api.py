@@ -25,7 +25,13 @@ def api(stub_client) -> TestClient:
     return TestClient(create_app(DepartureTimingService(stub_client)))
 
 
-ASSESS = {"station": "서울역", "line": "1호선", "estimatedTimeToStation": 4, "currentTime": "08:30"}
+ASSESS = {
+    "station": "서울역",
+    "line": "1호선",
+    "direction": "상행",
+    "estimatedTimeToStation": 4,
+    "currentTime": "08:30",
+}
 
 
 def test_health(api):
@@ -160,3 +166,12 @@ def test_unknown_direction_is_400(api):
     res = api.post("/departure/assess", json={**ASSESS, "direction": "왼쪽"})
     assert res.status_code == 400
     assert res.json()["message"].startswith("알 수 없는 방향입니다: 왼쪽.")
+
+
+def test_omitted_direction_is_400(api):
+    payload = {key: value for key, value in ASSESS.items() if key != "direction"}
+    res = api.post("/departure/assess", json=payload)
+    assert res.status_code == 400
+    assert res.json()["message"] == (
+        "방향(direction)이 필요합니다. 1호선은 방향을 상행 또는 하행으로 입력해 주세요."
+    )

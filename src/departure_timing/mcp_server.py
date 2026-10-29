@@ -87,10 +87,11 @@ def create_mcp_server(get_service: Callable[[], DepartureTimingService]) -> Depa
     def assess_departure_timing(
         station: Annotated[str, Field(description="출발하려는 지하철역 이름 (예: 서울역)")],
         line: Annotated[str, Field(description="지하철 노선 (예: 1호선)")],
+        # Java에서는 선택이었지만, 생략하면 양방향 열차가 섞여 판단이 틀리므로 필수로 둔다.
+        direction: Annotated[str, Field(description="상행/하행 (2호선은 내선/외선)")],
         estimatedTimeToStation: Annotated[
             float | None, Field(description="집에서 역까지 이동 시간(분)")
         ] = None,
-        direction: Annotated[str | None, Field(description="상행/하행 (2호선은 내선/외선)")] = None,
         presetName: Annotated[str | None, Field(description="저장된 이동 시간 프리셋 이름")] = None,
     ) -> AssessDepartureResponse:
         result = get_service().assess(

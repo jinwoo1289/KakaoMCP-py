@@ -24,7 +24,13 @@ def service(stub_client: StubArrivalClient) -> DepartureTimingService:
 
 
 def request(estimated: int | None, **kwargs) -> AssessRequest:
-    fields = {"station": "서울역", "line": "1호선", "estimated_time_to_station": estimated}
+    # direction은 필수다(Java에서는 선택). Java 테스트의 판단 내용과는 무관하므로 기본값으로 채운다.
+    fields = {
+        "station": "서울역",
+        "line": "1호선",
+        "direction": "상행",
+        "estimated_time_to_station": estimated,
+    }
     fields.update(kwargs)
     return AssessRequest(**fields)
 
@@ -198,8 +204,8 @@ def test_direction_not_matching_line_is_invalid(service, stub_client, line, dire
 
 @pytest.mark.parametrize(
     ("line", "direction"),
-    [("2호선", "내선"), ("7호선", "하행"), ("2호선", None), ("7호선", None)],
-    ids=["line2-inner", "line7-down", "line2-no-direction", "line7-no-direction"],
+    [("2호선", "내선"), ("7호선", "하행")],
+    ids=["line2-inner", "line7-down"],
 )
 def test_direction_matching_line_is_assessed(service, stub_client, line, direction):
     stub_client.arrivals = [10]
@@ -225,6 +231,20 @@ def test_unknown_direction_is_invalid(service, stub_client, line, direction, hin
     assert stub_client.calls == []
 
 
-def test_blank_direction_is_treated_as_omitted(service, stub_client):
+@pytest.mark.parametrize(
+    ("line", "direction", "message"),
+    [
+        ("2호선", None, "방향(direction)이 필요합니다. 2호선은 방향을 내선 또는 외선으로 입력해 주세요."),
+        ("7호선", None, "방향(direction)이 필요합니다. 7호선은 방향을 상행 또는 하행으로 입력해 주세요."),
+        ("7호선", "  ", "방향(direction)이 필요합니다. 7호선은 방향을 상행 또는 하행으로 입력해 주세요."),
+    ],
+    ids=["line2-omitted", "line7-omitted", "blank"],
+)
+def test_omitted_direction_is_invalid(service, stub_client, line, direction, message):
+    # Java는 방향을 생략하면 필터 없이 양방향 열차를 섞어 판단했다(선택 입력).
+    # 생략해도 반대 방향 열차가 섞이는 같은 문제가 있어 필수로 바꿨다.
     stub_client.arrivals = [10]
-    assert service.assess(request(4, line="7호선", direction="  ")).decision is Decision.WAIT
+    with pytest.raises(InvalidInputError) as excinfo:
+        service.assess(request(4, line=line, direction=direction))
+    assert str(excinfo.value) == message
+    assert stub_client.calls == []
