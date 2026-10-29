@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "departure-timing"
+version = "0.1.0"
+description = "지하철 실시간 도착 정보로 언제 출발할지 판단하는 서비스 (KakaoMCP Python 재구현)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/departure_timing"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
