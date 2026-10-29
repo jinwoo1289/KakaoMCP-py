@@ -5,6 +5,7 @@ Java와 달리 입력 오류와 도착 정보 부재는 판단 결과가 아니�
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, time
 
 from departure_timing.clients.base import ArrivalClient
@@ -55,14 +56,31 @@ class DepartureTimingService:
         resolve_direction(request.direction, request.line)
         estimated = self._resolve_estimated_time(request)
 
-        arrivals = self._arrival_client.get_remaining_minutes(
+        snapshot = self._arrival_client.get_arrivals(
             request.station, request.line, request.direction
         )
+        arrivals = snapshot.minutes
         if not arrivals:
             # 클라이언트는 빈 목록 대신 ArrivalUnavailableError를 던지기로 약속하지만,
             # 어떤 구현이든 빈 목록으로 판단 결과를 만들지 않도록 여기서도 막는다.
-            raise ArrivalUnavailableError("client returned no arrivals", UnavailableCause.NO_TRAINS)
+            cause = (
+                UnavailableCause.UNKNOWN_ARRIVAL_TIMES
+                if snapshot.unknown_count
+                else UnavailableCause.NO_TRAINS
+            )
+            raise ArrivalUnavailableError("client returned no known arrivals", cause)
 
+        result = self._decide(arrivals, estimated, request.current_time or self._now())
+        if not snapshot.unknown_count:
+            return result
+        return replace(
+            result,
+            reason=f"{result.reason} 도착 시간이 제공되지 않은 열차 "
+            f"{snapshot.unknown_count}대는 판단에서 제외했습니다.",
+            unknown_arrival_count=snapshot.unknown_count,
+        )
+
+    def _decide(self, arrivals: list[int], estimated: int, current_time: time) -> AssessResult:
         station_wait: int | None = None
         for arrival_min in arrivals:
             wait = arrival_min - (estimated + BUFFER_MINUTES)
@@ -70,16 +88,17 @@ class DepartureTimingService:
                 station_wait = wait
                 break
 
-        current_time = request.current_time or self._now()
-
         if station_wait is None:
             # 근거 없는 고정 시간 대신, 목록의 첫 열차가 지나가 목록이 갱신되는 시점을 안내한다.
             first_arrival = min(arrivals)
+            if first_arrival == 0:
+                recheck = "첫 열차가 지금 역에 들어오고 있으니, 이 열차가 지나간 뒤 다시 확인해 주세요."
+            else:
+                recheck = f"첫 열차가 약 {first_arrival}분 뒤 도착하니, 그 이후에 다시 확인해 주세요."
             return AssessResult(
                 Decision.TOO_LATE,
                 None,
-                "현재 도착 예정인 열차들로는 탑승이 어렵습니다. "
-                f"첫 열차가 약 {first_arrival}분 뒤 도착하니, 그 이후에 다시 확인해 주세요.",
+                f"현재 도착 예정인 열차들로는 탑승이 어렵습니다. {recheck}",
                 recheck_after_minutes=first_arrival,
             )
         if station_wait == 0:

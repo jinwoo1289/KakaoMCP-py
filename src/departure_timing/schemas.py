@@ -40,6 +40,9 @@ class AssessDepartureResponse(CamelModel):
     recheck_after_minutes: int | None = Field(
         None, description="TOO_LATE일 때만: 첫 열차 도착까지 남은 분. 이 시간 뒤에 다시 확인. 그 밖에는 null"
     )
+    unknown_arrival_count: int = Field(
+        0, description="도착 시간이 제공되지 않아 판단에서 제외한 열차 수"
+    )
 
 
 class SavePresetRequest(CamelModel):

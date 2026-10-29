@@ -18,13 +18,19 @@ class UnavailableCause(str, Enum):
     TRANSIENT = "transient"  # 서버 무응답·장애: 잠시 후 다시 시도하면 될 수 있다
     PERMANENT = "permanent"  # 키 오류·호출 한도·요청 형식 등 설정 문제: 다시 시도해도 같다
     NO_TRAINS = "no_trains"  # 정상 응답이지만 해당 호선·방향 열차가 없다
+    # 해당 호선·방향 열차는 있지만 모두 도착 시간이 제공되지 않았다. 열차가 가까워지면 제공될 수 있다.
+    UNKNOWN_ARRIVAL_TIMES = "unknown_arrival_times"
 
 
 _PUBLIC_MESSAGES = {
     UnavailableCause.TRANSIENT: "실시간 정보 서버가 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
     UnavailableCause.PERMANENT: "실시간 정보 서비스 설정 문제로 조회할 수 없습니다. 다시 시도해도 해결되지 않습니다.",
     UnavailableCause.NO_TRAINS: "현재 운행 중인 열차 정보가 없습니다.",
+    UnavailableCause.UNKNOWN_ARRIVAL_TIMES: (
+        "다가오는 열차는 있지만 도착 시간이 제공되지 않아 판단할 수 없습니다. 잠시 후 다시 시도해 주세요."
+    ),
 }
+_RETRYABLE_CAUSES = frozenset({UnavailableCause.TRANSIENT, UnavailableCause.UNKNOWN_ARRIVAL_TIMES})
 
 
 class ArrivalUnavailableError(DepartureTimingError):
@@ -40,7 +46,7 @@ class ArrivalUnavailableError(DepartureTimingError):
 
     @property
     def retryable(self) -> bool:
-        return self.cause is UnavailableCause.TRANSIENT
+        return self.cause in _RETRYABLE_CAUSES
 
     @property
     def public_message(self) -> str:

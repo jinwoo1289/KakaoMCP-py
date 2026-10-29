@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 import httpx
 
+from departure_timing.domain import Arrivals
 from departure_timing.errors import ArrivalUnavailableError, InvalidInputError, UnavailableCause
 from departure_timing.lines import normalize_station, resolve_direction, subway_id_for
 
@@ -57,11 +58,17 @@ def classify_api_code(code: str) -> UnavailableCause:
     return UnavailableCause.PERMANENT
 
 
+# arvlCd(도착 코드): 0 진입, 1 도착, 2 출발, 3 전역 출발, 4 전역 진입, 5 전역 도착, 99 운행 중
+_AT_STATION_CODES = frozenset({"0", "1"})  # 지금 이 역에 들어오거나 서 있는 열차
+_DEPARTING_CODE = "2"  # 이 역을 떠나는 열차: 탈 수 없고, 도착 예정 열차도 아니다
+
+
 @dataclass(frozen=True)
 class _Row:
     subway_id: str | None
     updn_line: str | None
     barvl_dt: str | None
+    arvl_cd: str | None = None
 
 
 def _text(element: ET.Element, tag: str) -> str | None:
@@ -114,7 +121,12 @@ def _parse_rows(body: str) -> list[_Row]:
         raise ArrivalUnavailableError(f"unexpected response root <{root.tag}>", UnavailableCause.TRANSIENT)
 
     return [
-        _Row(_text(row, "subwayId"), _text(row, "updnLine"), _text(row, "barvlDt"))
+        _Row(
+            _text(row, "subwayId"),
+            _text(row, "updnLine"),
+            _text(row, "barvlDt"),
+            (_text(row, "arvlCd") or "").strip() or None,
+        )
         for row in root.iter("row")
     ]
 
@@ -127,6 +139,19 @@ def _seconds_to_minutes_ceil(seconds: str | None) -> int | None:
         return None
     sec = int(seconds)
     return 0 if sec == 0 else math.ceil(sec / 60)
+
+
+def _arrival_minutes(row: _Row) -> int | None:
+    """도착까지 남은 분. 도착 시간을 모르면 None.
+
+    API는 도착 시간을 모를 때도 barvlDt=0을 준다(예: "[5]번째 전역"). 그래서 0은
+    arvlCd가 진입·도착일 때만 "지금 들어오는 열차"로 보고, 그 밖의 0은 모르는 것으로 본다.
+    몇 번째 전 역인지로 분을 추정하지는 않는다.
+    """
+    if row.arvl_cd in _AT_STATION_CODES:
+        return 0
+    minutes = _seconds_to_minutes_ceil(row.barvl_dt)
+    return minutes if minutes else None
 
 
 @dataclass(frozen=True)
@@ -166,9 +191,9 @@ class SeoulArrivalClient:
         self._clock = clock
         self._jitter = jitter
 
-    def get_remaining_minutes(
+    def get_arrivals(
         self, station: str | None, line: str | None, direction: str | None
-    ) -> list[int]:
+    ) -> Arrivals:
         target_subway_id = subway_id_for(line)
         if not station or not station.strip():
             raise InvalidInputError("station(역 이름)을 입력해 주세요.")
@@ -181,25 +206,32 @@ class SeoulArrivalClient:
             logger.warning("seoul arrival API response unusable: no rows station=%s", station)
             raise ArrivalUnavailableError("no rows", UnavailableCause.NO_TRAINS)
 
-        minutes = (
-            _seconds_to_minutes_ceil(row.barvl_dt)
-            for row in rows
-            if row.subway_id == target_subway_id
-            and row.updn_line == normalized_dir
-        )
-        live = sorted(m for m in minutes if m is not None and m > 0)[:MAX_ARRIVALS]
+        known: list[int] = []
+        unknown = 0
+        for row in rows:
+            if row.subway_id != target_subway_id or row.updn_line != normalized_dir:
+                continue
+            if row.arvl_cd == _DEPARTING_CODE:
+                continue
+            minutes = _arrival_minutes(row)
+            if minutes is None:
+                unknown += 1
+            else:
+                known.append(minutes)
+        live = sorted(known)[:MAX_ARRIVALS]
 
         logger.info(
-            "arrivals station=%s line=%s direction=%s rows=%d live=%s",
-            station, line, direction, len(rows), live,
+            "arrivals station=%s line=%s direction=%s rows=%d live=%s unknown=%d",
+            station, line, direction, len(rows), live, unknown,
         )
         if not live:
+            cause = UnavailableCause.UNKNOWN_ARRIVAL_TIMES if unknown else UnavailableCause.NO_TRAINS
             logger.warning(
-                "seoul arrival API response unusable: no trains station=%s line=%s direction=%s",
-                station, line, direction,
+                "seoul arrival API response unusable: %s station=%s line=%s direction=%s unknown=%d",
+                cause.value, station, line, direction, unknown,
             )
-            raise ArrivalUnavailableError("no trains for line/direction", UnavailableCause.NO_TRAINS)
-        return live
+            raise ArrivalUnavailableError(f"no known arrival times (unknown={unknown})", cause)
+        return Arrivals(live, unknown)
 
     def _url(self, station: str) -> str:
         # API 키가 경로에 들어가므로 이 URL은 로그에 남기지 않는다.

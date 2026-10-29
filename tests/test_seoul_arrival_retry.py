@@ -68,7 +68,7 @@ def make_client(server: ScriptedServer, clock: FakeClock, **policy) -> SeoulArri
 
 
 def fetch(client: SeoulArrivalClient) -> list[int]:
-    return client.get_remaining_minutes("서울역", "1호선", "상행")
+    return client.get_arrivals("서울역", "1호선", "상행").minutes
 
 
 @pytest.mark.parametrize(

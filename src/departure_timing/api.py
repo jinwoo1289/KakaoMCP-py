@@ -174,6 +174,7 @@ def create_app(
             recommended_departure_time=result.recommended_departure_time,
             reason=result.reason,
             recheck_after_minutes=result.recheck_after_minutes,
+            unknown_arrival_count=result.unknown_arrival_count,
         )
 
     @app.post("/presets", response_model=SavePresetResponse, responses={400: {"model": ErrorResponse}})

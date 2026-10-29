@@ -271,3 +271,44 @@ def test_too_late_tells_when_to_recheck_from_first_arrival(service, stub_client,
 def test_recheck_after_minutes_is_only_for_too_late(service, stub_client, arrivals):
     stub_client.arrivals = arrivals
     assert service.assess(request(4)).recheck_after_minutes is None
+
+
+
+# --- 도착 시간을 모르는 열차 (Java와 다름: Java는 barvlDt=0 열차를 조용히 버렸다) ---
+
+
+def test_unknown_trains_are_excluded_but_reported(service, stub_client):
+    stub_client.arrivals = [10]
+    stub_client.unknown_count = 2
+    res = service.assess(request(4, current_time=time(8, 30)))
+    assert res.decision is Decision.WAIT  # 판정은 도착 시간이 알려진 열차로만
+    assert res.unknown_arrival_count == 2
+    assert res.reason == (
+        "지금 출발하면 역에서 약 5분 대기합니다. 08:35에 출발을 추천합니다. "
+        "도착 시간이 제공되지 않은 열차 2대는 판단에서 제외했습니다."
+    )
+
+
+def test_no_unknown_trains_keeps_reason_unchanged(service, stub_client):
+    stub_client.arrivals = [10]
+    res = service.assess(request(4, current_time=time(8, 30)))
+    assert res.unknown_arrival_count == 0
+    assert "제외했습니다" not in res.reason
+
+
+def test_only_unknown_trains_is_unavailable(service, stub_client):
+    stub_client.arrivals = []
+    stub_client.unknown_count = 3
+    with pytest.raises(ArrivalUnavailableError) as excinfo:
+        service.assess(request(4))
+    assert excinfo.value.cause is UnavailableCause.UNKNOWN_ARRIVAL_TIMES
+    assert excinfo.value.retryable is True
+    assert excinfo.value.public_message == "다가오는 열차는 있지만 도착 시간이 제공되지 않아 판단할 수 없습니다. 잠시 후 다시 시도해 주세요."
+
+
+def test_too_late_when_first_train_is_entering_now(service, stub_client):
+    stub_client.arrivals = [0, 3]  # 0분: 지금 진입·도착 중인 열차
+    res = service.assess(request(4))
+    assert res.decision is Decision.TOO_LATE
+    assert res.recheck_after_minutes == 0
+    assert res.reason.endswith("첫 열차가 지금 역에 들어오고 있으니, 이 열차가 지나간 뒤 다시 확인해 주세요.")

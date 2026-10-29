@@ -11,7 +11,7 @@ from departure_timing.service import DepartureTimingService
 
 
 class FailingArrivalClient:
-    def get_remaining_minutes(self, station, line, direction):
+    def get_arrivals(self, station, line, direction):
         raise ArrivalUnavailableError("connection error", UnavailableCause.TRANSIENT)
 
 
@@ -48,6 +48,7 @@ def test_assess_returns_camel_case_decision(api):
         "recommendedDepartureTime": "08:35",
         "reason": "지금 출발하면 역에서 약 5분 대기합니다. 08:35에 출발을 추천합니다.",
         "recheckAfterMinutes": None,
+        "unknownArrivalCount": 0,
     }
 
 
@@ -230,3 +231,19 @@ def test_key_error_details_stay_in_logs_not_response(caplog):
     res = seoul_api(text).post("/departure/assess", json=ASSESS)
     assert "INFO-100" not in res.text and "인증키" not in res.text
     assert any("INFO-100" in r.getMessage() for r in caplog.records)
+
+
+
+def test_unknown_arrival_count_in_response(api, stub_client):
+    stub_client.unknown_count = 1
+    body = api.post("/departure/assess", json=ASSESS).json()
+    assert body["unknownArrivalCount"] == 1
+    assert body["reason"].endswith("도착 시간이 제공되지 않은 열차 1대는 판단에서 제외했습니다.")
+
+
+def test_only_unknown_trains_is_502_retryable(api, stub_client):
+    stub_client.arrivals = []
+    stub_client.unknown_count = 2
+    res = api.post("/departure/assess", json=ASSESS)
+    assert res.status_code == 502
+    assert res.json() == {"error": "ARRIVAL_UNAVAILABLE", "message": "다가오는 열차는 있지만 도착 시간이 제공되지 않아 판단할 수 없습니다. 잠시 후 다시 시도해 주세요.", "retryable": True}

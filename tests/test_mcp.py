@@ -69,7 +69,7 @@ class FailingArrivalClient:
     def __init__(self, cause: UnavailableCause = UnavailableCause.TRANSIENT) -> None:
         self.cause = cause
 
-    def get_remaining_minutes(self, station, line, direction):
+    def get_arrivals(self, station, line, direction):
         raise ArrivalUnavailableError("API INFO-100: 인증키가 유효하지 않습니다.", self.cause)
 
 
@@ -110,6 +110,7 @@ async def test_assess_returns_decision_as_text_and_structured_content(mcp):
         "recommendedDepartureTime": "08:35",
         "reason": "지금 출발하면 역에서 약 5분 대기합니다. 08:35에 출발을 추천합니다.",
         "recheckAfterMinutes": None,
+        "unknownArrivalCount": 0,
     }
     assert result.is_error is False
     assert result.structured_content == expected
@@ -182,8 +183,9 @@ async def test_schema_violations_are_tool_errors_per_spec(mcp, arguments, field)
         (UnavailableCause.TRANSIENT, "[판단 불가] 실시간 정보 서버가 응답하지 않습니다. 잠시 후 다시 시도해 주세요."),
         (UnavailableCause.PERMANENT, "[판단 불가] 실시간 정보 서비스 설정 문제로 조회할 수 없습니다. 다시 시도해도 해결되지 않습니다."),
         (UnavailableCause.NO_TRAINS, "[판단 불가] 현재 운행 중인 열차 정보가 없습니다."),
+        (UnavailableCause.UNKNOWN_ARRIVAL_TIMES, "[판단 불가] 다가오는 열차는 있지만 도착 시간이 제공되지 않아 판단할 수 없습니다. 잠시 후 다시 시도해 주세요."),
     ],
-    ids=["transient", "permanent", "no-trains"],
+    ids=["transient", "permanent", "no-trains", "unknown-arrival-times"],
 )
 async def test_arrival_unavailable_is_tool_error_with_cause(cause, expected):
     service = DepartureTimingService(FailingArrivalClient(cause))
@@ -277,3 +279,11 @@ def test_http_rejects_host_not_allowed(service, monkeypatch):
         res = api.post("/mcp", json=initialize(), headers=MCP_HEADERS)
         assert res.status_code >= 400
         assert api.get("/health").status_code == 200  # REST는 영향 없음
+
+
+
+async def test_structured_content_reports_unknown_arrival_count(mcp, stub_client):
+    stub_client.unknown_count = 2
+    result = await mcp.call_tool("assess_departure_timing", ASSESS)
+    assert result.structured_content["unknownArrivalCount"] == 2
+    assert result.structured_content["reason"].endswith("열차 2대는 판단에서 제외했습니다.")
