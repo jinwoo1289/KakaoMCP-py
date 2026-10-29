@@ -9,6 +9,7 @@ import pytest
 
 from departure_timing.clients import StubArrivalClient
 from departure_timing.domain import AssessRequest, Decision, SavePresetRequest
+from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
 from departure_timing.service import DepartureTimingService
 
 
@@ -23,9 +24,9 @@ def service(stub_client: StubArrivalClient) -> DepartureTimingService:
 
 
 def request(estimated: int | None, **kwargs) -> AssessRequest:
-    return AssessRequest(
-        station="서울역", line="1호선", estimated_time_to_station=estimated, **kwargs
-    )
+    fields = {"station": "서울역", "line": "1호선", "estimated_time_to_station": estimated}
+    fields.update(kwargs)
+    return AssessRequest(**fields)
 
 
 # --- Java DepartureTimingServiceTest 이식 ---
@@ -53,20 +54,26 @@ def test_too_late_when_no_train_can_be_caught(service, stub_client):
     assert res.decision is Decision.TOO_LATE
 
 
-def test_wait_when_estimated_time_missing_and_no_preset(service, stub_client):
-    """wait_whenEstimatedTimeMissingAndNoPreset"""
+def test_invalid_input_when_estimated_time_missing_and_no_preset(service, stub_client):
+    """wait_whenEstimatedTimeMissingAndNoPreset
+
+    Java는 WAIT를 돌려줬다. 하지만 WAIT는 "추천 시각에 출발하라"는 판단이고,
+    이동 시간이 없으면 애초에 판단할 수 없다. 사용자 입력 문제이므로 InvalidInputError(REST 400)로 바꿨다.
+    """
     stub_client.arrivals = [5]
-    res = service.assess(request(None))
-    assert res.decision is Decision.WAIT
-    assert "제공해주세요" in res.reason
+    with pytest.raises(InvalidInputError, match="제공해주세요"):
+        service.assess(request(None))
 
 
-def test_wait_when_arrival_api_returns_empty(service, stub_client):
-    """wait_whenArrivalApiReturnsEmpty"""
+def test_arrival_unavailable_when_arrival_api_returns_empty(service, stub_client):
+    """wait_whenArrivalApiReturnsEmpty
+
+    Java는 WAIT를 돌려줬다. 도착 정보가 없으면 판단 근거가 없으므로
+    정상 판단 결과 대신 ArrivalUnavailableError(REST 502, 판단 불가)로 바꿨다.
+    """
     stub_client.arrivals = []
-    res = service.assess(request(4))
-    assert res.decision is Decision.WAIT
-    assert "실시간 열차 정보" in res.reason
+    with pytest.raises(ArrivalUnavailableError, match="실시간 열차 정보"):
+        service.assess(request(4))
 
 
 def test_save_preset_success(service):
@@ -76,12 +83,16 @@ def test_save_preset_success(service):
 
 
 def test_save_preset_fails_when_name_is_blank(service):
-    """savePreset_fails_whenNameIsBlank"""
-    res = service.save_preset(SavePresetRequest(preset_name=" ", estimated_time_to_station=8))
-    assert res.success is False
+    """savePreset_fails_whenNameIsBlank
+
+    Java는 success=false를 HTTP 200으로 돌려줬다. assess와 같은 기준으로
+    입력 오류는 InvalidInputError(REST 400)로 알리도록 바꿨다.
+    """
+    with pytest.raises(InvalidInputError):
+        service.save_preset(SavePresetRequest(preset_name=" ", estimated_time_to_station=8))
 
 
-# --- 보강: Java 코드에서 읽어낸 동작을 고정 ---
+# --- 보강: 판단 로직 (Java와 동일) ---
 
 
 def test_wait_recommends_current_time_plus_station_wait(service, stub_client):
@@ -117,12 +128,47 @@ def test_preset_takes_priority_over_estimated_time(service, stub_client):
     assert res.decision is Decision.GO_NOW
 
 
-def test_unknown_preset_falls_back_to_estimated_time(service, stub_client):
+# --- 보강: 입력 오류 (Java와 다름) ---
+
+
+def test_unknown_preset_is_invalid_even_with_estimated_time(service, stub_client):
+    # Java는 없는 프리셋이면 조용히 estimatedTimeToStation으로 넘어갔다.
+    # 이름을 지정했다면 오타일 가능성이 크므로 엉뚱한 이동 시간으로 판단하지 않는다.
     stub_client.arrivals = [5]
-    res = service.assess(request(4, preset_name="nowhere"))
-    assert res.decision is Decision.GO_NOW
+    with pytest.raises(InvalidInputError, match="nowhere"):
+        service.assess(request(4, preset_name="nowhere"))
+
+
+@pytest.mark.parametrize("estimated", [0, -3])
+def test_non_positive_estimated_time_is_invalid(service, stub_client, estimated):
+    stub_client.arrivals = [5]
+    with pytest.raises(InvalidInputError):
+        service.assess(request(estimated))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"station": None},
+        {"station": "  "},
+        {"line": None},
+        {"line": ""},
+        {"line": "100호선"},
+    ],
+)
+def test_invalid_station_or_line_is_rejected_before_calling_api(service, stub_client, fields):
+    stub_client.arrivals = [5]
+    with pytest.raises(InvalidInputError):
+        service.assess(request(4, **fields))
+    assert stub_client.calls == []
+
+
+def test_input_error_wins_over_unavailable_api(service, stub_client):
+    stub_client.arrivals = []  # API가 비어 있어도 입력 오류를 먼저 알린다
+    with pytest.raises(InvalidInputError):
+        service.assess(request(None))
 
 
 def test_save_preset_fails_when_time_not_positive(service):
-    res = service.save_preset(SavePresetRequest(preset_name="home", estimated_time_to_station=0))
-    assert res.success is False
+    with pytest.raises(InvalidInputError):
+        service.save_preset(SavePresetRequest(preset_name="home", estimated_time_to_station=0))
