@@ -172,3 +172,37 @@ def test_input_error_wins_over_unavailable_api(service, stub_client):
 def test_save_preset_fails_when_time_not_positive(service):
     with pytest.raises(InvalidInputError):
         service.save_preset(SavePresetRequest(preset_name="home", estimated_time_to_station=0))
+
+
+# --- 보강: 호선별 방향 값 검증 (Java와 다름) ---
+# Java는 호선과 맞지 않는 방향이면 방향 필터를 끄고 양방향 열차를 섞어 판단했다.
+
+
+@pytest.mark.parametrize(
+    ("line", "direction", "message"),
+    [
+        ("2호선", "상행", "2호선은 방향을 내선 또는 외선으로 입력해 주세요."),
+        ("2", "down", "2호선은 방향을 내선 또는 외선으로 입력해 주세요."),
+        ("7호선", "외선", "7호선은 방향을 상행 또는 하행으로 입력해 주세요."),
+        ("7", "내선", "7호선은 방향을 상행 또는 하행으로 입력해 주세요."),
+    ],
+    ids=["line2-up", "line2-english-down", "line7-outer", "line7-number-inner"],
+)
+def test_direction_not_matching_line_is_invalid(service, stub_client, line, direction, message):
+    stub_client.arrivals = [10]
+    with pytest.raises(InvalidInputError) as excinfo:
+        service.assess(request(4, line=line, direction=direction))
+    assert str(excinfo.value) == message
+    assert stub_client.calls == []  # 외부 API를 부르기 전에 막는다
+
+
+@pytest.mark.parametrize(
+    ("line", "direction"),
+    [("2호선", "내선"), ("7호선", "하행"), ("2호선", None), ("7호선", None)],
+    ids=["line2-inner", "line7-down", "line2-no-direction", "line7-no-direction"],
+)
+def test_direction_matching_line_is_assessed(service, stub_client, line, direction):
+    stub_client.arrivals = [10]
+    res = service.assess(request(4, line=line, direction=direction))
+    assert res.decision is Decision.WAIT
+    assert stub_client.calls == [("서울역", line, direction)]  # 변환 없이 그대로 전달

@@ -24,7 +24,9 @@ JAVA_TOOLS = {
             "station": ("string", "출발하려는 지하철역 이름 (예: 서울역)"),
             "line": ("string", "지하철 노선 (예: 1호선)"),
             "estimatedTimeToStation": ("number", "집에서 역까지 이동 시간(분)"),
-            "direction": ("string", "상행/하행"),
+            # 의도적으로 Java("상행/하행")와 다르다: 2호선 데이터는 내선/외선이라
+            # LLM이 2호선에 상행/하행을 넣지 않도록 설명을 보완했다.
+            "direction": ("string", "상행/하행 (2호선은 내선/외선)"),
             "presetName": ("string", "저장된 이동 시간 프리셋 이름"),
         },
         ["station", "line"],
@@ -135,9 +137,11 @@ async def test_integral_float_minutes_are_accepted(mcp):
         ("assess_departure_timing", {**ASSESS, "estimatedTimeToStation": 0}, "estimatedTimeToStation"),
         ("assess_departure_timing", {**ASSESS, "station": " "}, "station"),
         ("assess_departure_timing", {**ASSESS, "estimatedTimeToStation": 7.5}, "정수"),
+        ("assess_departure_timing", {**ASSESS, "line": "2호선", "direction": "상행"}, "내선 또는 외선"),
+        ("assess_departure_timing", {**ASSESS, "line": "7호선", "direction": "외선"}, "상행 또는 하행"),
         ("save_preset", {"presetName": "home", "estimatedTimeToStation": -1}, "1분 이상"),
     ],
-    ids=["unknown-line", "unknown-preset", "zero-minutes", "blank-station", "fractional", "preset-minutes"],
+    ids=["unknown-line", "unknown-preset", "zero-minutes", "blank-station", "fractional", "line2-up", "line7-outer", "preset-minutes"],
 )
 async def test_domain_input_errors_are_tool_errors(mcp, tool, arguments, reason):
     result = await mcp.call_tool(tool, arguments)

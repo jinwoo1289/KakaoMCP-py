@@ -145,3 +145,12 @@ def test_startup_with_api_key_wires_real_client(monkeypatch):
     with TestClient(create_app()) as api:
         assert api.get("/health").status_code == 200
         assert isinstance(api.app.state.service, DepartureTimingService)
+
+
+def test_direction_not_matching_line_is_400(api):
+    res = api.post("/departure/assess", json={**ASSESS, "line": "2호선", "direction": "상행"})
+    assert res.status_code == 400
+    assert res.json() == {
+        "error": "INVALID_INPUT",
+        "message": "2호선은 방향을 내선 또는 외선으로 입력해 주세요.",
+    }

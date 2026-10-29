@@ -90,7 +90,7 @@ def create_mcp_server(get_service: Callable[[], DepartureTimingService]) -> Depa
         estimatedTimeToStation: Annotated[
             float | None, Field(description="집에서 역까지 이동 시간(분)")
         ] = None,
-        direction: Annotated[str | None, Field(description="상행/하행")] = None,
+        direction: Annotated[str | None, Field(description="상행/하행 (2호선은 내선/외선)")] = None,
         presetName: Annotated[str | None, Field(description="저장된 이동 시간 프리셋 이름")] = None,
     ) -> AssessDepartureResponse:
         result = get_service().assess(
