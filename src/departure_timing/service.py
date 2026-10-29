@@ -15,7 +15,7 @@ from departure_timing.domain import (
     SavePresetRequest,
     SavePresetResult,
 )
-from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
+from departure_timing.errors import ArrivalUnavailableError, InvalidInputError, UnavailableCause
 from departure_timing.lines import resolve_direction, subway_id_for
 
 BUFFER_MINUTES = 1
@@ -61,7 +61,7 @@ class DepartureTimingService:
         if not arrivals:
             # 클라이언트는 빈 목록 대신 ArrivalUnavailableError를 던지기로 약속하지만,
             # 어떤 구현이든 빈 목록으로 판단 결과를 만들지 않도록 여기서도 막는다.
-            raise ArrivalUnavailableError("실시간 열차 정보를 불러오지 못했습니다.")
+            raise ArrivalUnavailableError("client returned no arrivals", UnavailableCause.NO_TRAINS)
 
         station_wait: int | None = None
         for arrival_min in arrivals:
@@ -73,11 +73,14 @@ class DepartureTimingService:
         current_time = request.current_time or self._now()
 
         if station_wait is None:
+            # 근거 없는 고정 시간 대신, 목록의 첫 열차가 지나가 목록이 갱신되는 시점을 안내한다.
+            first_arrival = min(arrivals)
             return AssessResult(
                 Decision.TOO_LATE,
                 None,
                 "현재 도착 예정인 열차들로는 탑승이 어렵습니다. "
-                "다음 열차 정보 갱신을 위해 잠시 후에 다시 시도해 주세요",
+                f"첫 열차가 약 {first_arrival}분 뒤 도착하니, 그 이후에 다시 확인해 주세요.",
+                recheck_after_minutes=first_arrival,
             )
         if station_wait == 0:
             return AssessResult(

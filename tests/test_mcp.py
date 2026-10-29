@@ -11,7 +11,7 @@ from mcp.types import INVALID_PARAMS
 
 from departure_timing.api import create_app
 from departure_timing.clients import StubArrivalClient
-from departure_timing.errors import ArrivalUnavailableError
+from departure_timing.errors import ArrivalUnavailableError, UnavailableCause
 from departure_timing.mcp_server import create_mcp_server
 from departure_timing.service import DepartureTimingService
 
@@ -66,8 +66,11 @@ async def mcp(service):
 
 
 class FailingArrivalClient:
+    def __init__(self, cause: UnavailableCause = UnavailableCause.TRANSIENT) -> None:
+        self.cause = cause
+
     def get_remaining_minutes(self, station, line, direction):
-        raise ArrivalUnavailableError("도착 정보 API 호출에 실패했습니다 (3회 시도, 마지막 사유: HTTP 503).")
+        raise ArrivalUnavailableError("API INFO-100: 인증키가 유효하지 않습니다.", self.cause)
 
 
 def text_of(result) -> str:
@@ -106,6 +109,7 @@ async def test_assess_returns_decision_as_text_and_structured_content(mcp):
         "decision": "WAIT",
         "recommendedDepartureTime": "08:35",
         "reason": "지금 출발하면 역에서 약 5분 대기합니다. 08:35에 출발을 추천합니다.",
+        "recheckAfterMinutes": None,
     }
     assert result.is_error is False
     assert result.structured_content == expected
@@ -172,15 +176,30 @@ async def test_schema_violations_are_tool_errors_per_spec(mcp, arguments, field)
 # --- 도구 실행 오류: 판단 불가 ---
 
 
-async def test_arrival_unavailable_is_tool_error():
-    service = DepartureTimingService(FailingArrivalClient())
+@pytest.mark.parametrize(
+    ("cause", "expected"),
+    [
+        (UnavailableCause.TRANSIENT, "[판단 불가] 실시간 정보 서버가 응답하지 않습니다. 잠시 후 다시 시도해 주세요."),
+        (UnavailableCause.PERMANENT, "[판단 불가] 실시간 정보 서비스 설정 문제로 조회할 수 없습니다. 다시 시도해도 해결되지 않습니다."),
+        (UnavailableCause.NO_TRAINS, "[판단 불가] 현재 운행 중인 열차 정보가 없습니다."),
+    ],
+    ids=["transient", "permanent", "no-trains"],
+)
+async def test_arrival_unavailable_is_tool_error_with_cause(cause, expected):
+    service = DepartureTimingService(FailingArrivalClient(cause))
     async with Client(create_mcp_server(lambda: service)) as mcp:
         result = await mcp.call_tool("assess_departure_timing", ASSESS)
 
     assert result.is_error is True
-    assert text_of(result).startswith("[판단 불가] ")
-    assert text_of(result).endswith("잠시 후 다시 시도해 주세요.")
+    assert text_of(result) == expected  # 세부 사유(오류 코드, 키 관련 원문)는 결과에 넣지 않는다
     assert result.structured_content is None
+
+
+async def test_too_late_structured_content_has_recheck_after_minutes(mcp, stub_client):
+    stub_client.arrivals = [2, 3]
+    result = await mcp.call_tool("assess_departure_timing", ASSESS)
+    assert result.structured_content["decision"] == "TOO_LATE"
+    assert result.structured_content["recheckAfterMinutes"] == 2
 
 
 # --- 프로토콜 오류 ---

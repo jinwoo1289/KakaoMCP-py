@@ -37,6 +37,9 @@ class AssessDepartureResponse(CamelModel):
         description="HH:mm, 바로 출발이면 NOW, TOO_LATE면 null"
     )
     reason: str
+    recheck_after_minutes: int | None = Field(
+        None, description="TOO_LATE일 때만: 첫 열차 도착까지 남은 분. 이 시간 뒤에 다시 확인. 그 밖에는 null"
+    )
 
 
 class SavePresetRequest(CamelModel):
@@ -54,5 +57,11 @@ class HealthResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    error: Literal["INVALID_INPUT", "ARRIVAL_UNAVAILABLE"]
+    error: Literal["INVALID_INPUT"]
     message: str
+
+
+class UnavailableErrorResponse(BaseModel):
+    error: Literal["ARRIVAL_UNAVAILABLE"]
+    message: str
+    retryable: bool = Field(description="같은 요청을 잠시 후 다시 보내면 해결될 수 있는지")

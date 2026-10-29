@@ -31,8 +31,11 @@ class FakeClock:
         self.now += seconds
 
 
+SERVER_ERROR_BODY = "<RESULT><code>ERROR-500</code><message>서버 오류입니다.</message></RESULT>"
+
+
 class ScriptedServer:
-    """정해 둔 순서대로 실패(예외 또는 상태 코드)를 돌려준 뒤 성공하는 Stub 서버."""
+    """정해 둔 순서대로 실패(예외, 상태 코드, 본문 문자열)를 돌려준 뒤 성공하는 Stub 서버."""
 
     def __init__(self, script, clock: FakeClock, request_seconds: float = 0.0) -> None:
         self.script = list(script)
@@ -48,6 +51,8 @@ class ScriptedServer:
         step = self.script.pop(0) if self.script else 200
         if isinstance(step, Exception):
             raise step
+        if isinstance(step, str):
+            return httpx.Response(200, text=step)
         return httpx.Response(step, text=OK_BODY if step == 200 else "")
 
 
@@ -157,3 +162,30 @@ def test_backoff_adds_jitter():
     policy = RetryPolicy()
     assert policy.backoff(1, jitter=0.0) == pytest.approx(0.3)
     assert policy.backoff(2, jitter=1.0) == pytest.approx(0.7)
+
+
+
+def test_retries_body_server_error_code_then_succeeds():
+    # 이 API는 서버 오류도 HTTP 200 + 본문 코드(ERROR-500)로 알린다. HTTP 5xx와 같이 재시도한다.
+    clock = FakeClock()
+    server = ScriptedServer([SERVER_ERROR_BODY], clock)
+    assert fetch(make_client(server, clock)) == [2]
+    assert server.attempts == 2
+
+
+def test_body_server_error_exhausted_is_transient():
+    clock = FakeClock()
+    server = ScriptedServer([SERVER_ERROR_BODY] * 3, clock)
+    with pytest.raises(ArrivalUnavailableError, match="3회 시도.*ERROR-500") as excinfo:
+        fetch(make_client(server, clock))
+    assert excinfo.value.retryable is True
+    assert server.attempts == 3
+
+
+def test_does_not_retry_permanent_body_error_code():
+    clock = FakeClock()
+    server = ScriptedServer(['{"status":500,"code":"INFO-100","message":"인증키 오류","total":0}'], clock)
+    with pytest.raises(ArrivalUnavailableError) as excinfo:
+        fetch(make_client(server, clock))
+    assert excinfo.value.retryable is False
+    assert server.attempts == 1

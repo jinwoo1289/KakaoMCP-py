@@ -9,7 +9,7 @@ import pytest
 
 from departure_timing.clients import StubArrivalClient
 from departure_timing.domain import AssessRequest, Decision, SavePresetRequest
-from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
+from departure_timing.errors import ArrivalUnavailableError, InvalidInputError, UnavailableCause
 from departure_timing.service import DepartureTimingService
 
 
@@ -78,8 +78,10 @@ def test_arrival_unavailable_when_arrival_api_returns_empty(service, stub_client
     정상 판단 결과 대신 ArrivalUnavailableError(REST 502, 판단 불가)로 바꿨다.
     """
     stub_client.arrivals = []
-    with pytest.raises(ArrivalUnavailableError, match="실시간 열차 정보"):
+    with pytest.raises(ArrivalUnavailableError) as excinfo:
         service.assess(request(4))
+    assert excinfo.value.cause is UnavailableCause.NO_TRAINS
+    assert excinfo.value.public_message == "현재 운행 중인 열차 정보가 없습니다."
 
 
 def test_save_preset_success(service):
@@ -248,3 +250,24 @@ def test_omitted_direction_is_invalid(service, stub_client, line, direction, mes
         service.assess(request(4, line=line, direction=direction))
     assert str(excinfo.value) == message
     assert stub_client.calls == []
+
+
+# --- TOO_LATE 재확인 시점 (Java와 다름: Java는 근거 없이 "잠시 후에 다시 시도"만 안내했다) ---
+
+
+@pytest.mark.parametrize("arrivals", [[2, 3], [3, 2]], ids=["sorted", "unsorted"])
+def test_too_late_tells_when_to_recheck_from_first_arrival(service, stub_client, arrivals):
+    stub_client.arrivals = arrivals  # 4+1분 뒤에 도착하는 열차가 없다
+    res = service.assess(request(4))
+    assert res.decision is Decision.TOO_LATE
+    assert res.recheck_after_minutes == 2
+    assert res.reason == (
+        "현재 도착 예정인 열차들로는 탑승이 어렵습니다. "
+        "첫 열차가 약 2분 뒤 도착하니, 그 이후에 다시 확인해 주세요."
+    )
+
+
+@pytest.mark.parametrize("arrivals", [[5], [10]], ids=["go-now", "wait"])
+def test_recheck_after_minutes_is_only_for_too_late(service, stub_client, arrivals):
+    stub_client.arrivals = arrivals
+    assert service.assess(request(4)).recheck_after_minutes is None

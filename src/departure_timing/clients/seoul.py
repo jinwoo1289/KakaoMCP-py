@@ -1,7 +1,7 @@
 """서울시 실시간 지하철 도착 정보 API 클라이언트 (Java SeoulArrivalClient 이식).
 
 Java 버전은 실패하면 가짜 도착 정보 [2, 5, 8, 11, 14]를 돌려줬지만,
-여기서는 도착 정보를 얻지 못하면 ArrivalUnavailableError를 던진다.
+여기서는 도착 정보를 얻지 못하면 원인(일시적/영구/열차 없음)을 담은 ArrivalUnavailableError를 던진다.
 """
 
 import json
@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import httpx
 
-from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
+from departure_timing.errors import ArrivalUnavailableError, InvalidInputError, UnavailableCause
 from departure_timing.lines import normalize_station, resolve_direction, subway_id_for
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,35 @@ DEFAULT_BASE_URL = "http://swopenAPI.seoul.go.kr/api/subway"
 MAX_ARRIVALS = 5
 _OK_CODE = "INFO-000"
 _DIGITS = re.compile(r"[0-9]+")
+
+# 서울 열린데이터광장 Open API 결과 코드 분류. (관찰)은 이 API에서 직접 확인한 코드.
+# 이 API는 오류도 HTTP 200 + 본문 코드로 알린다.
+_TRANSIENT_CODES = frozenset({"ERROR-500", "ERROR-600"})  # 서버 오류, DB 연결 오류
+_NO_TRAINS_CODES = frozenset({"INFO-200"})  # 해당하는 데이터 없음 (역 이름 오류와 구분 불가)
+_PERMANENT_CODES = frozenset({
+    "INFO-100",  # 인증키 오류 (관찰)
+    "INFO-300",  # 호출 건수 초과
+    "INFO-400",  # 권한 없음
+    "ERROR-300", "ERROR-301", "ERROR-310",  # 필수값 누락, 파일 타입, 서비스 없음
+    "ERROR-331", "ERROR-332", "ERROR-333", "ERROR-334", "ERROR-335", "ERROR-336",  # 요청 범위 (334·336 관찰)
+    "ERROR-337",  # 일별 트래픽 제한
+    "ERROR-404",  # 서비스 없음 (관찰)
+    "ERROR-601",  # SQL 문장 오류
+})
+_UNKNOWN_SERVER_ERROR = re.compile(r"ERROR-[56][0-9]{2}")
+
+
+def classify_api_code(code: str) -> UnavailableCause:
+    if code in _NO_TRAINS_CODES:
+        return UnavailableCause.NO_TRAINS
+    if code in _TRANSIENT_CODES:
+        return UnavailableCause.TRANSIENT
+    if code in _PERMANENT_CODES:
+        return UnavailableCause.PERMANENT
+    # 표에 없는 코드: 서버 측(5xx/6xx)은 일시적, 그 밖은 영구로 본다.
+    if _UNKNOWN_SERVER_ERROR.fullmatch(code):
+        return UnavailableCause.TRANSIENT
+    return UnavailableCause.PERMANENT
 
 
 @dataclass(frozen=True)
@@ -40,6 +69,18 @@ def _text(element: ET.Element, tag: str) -> str | None:
     return child.text if child is not None else None
 
 
+class _RetryableFailure(Exception):
+    """다시 시도할 만한 일시적 실패 (타임아웃, 연결 실패, 5xx, 429, 본문 서버 오류 코드)."""
+
+
+def _raise_api_error(code: str, message: str) -> None:
+    detail = f"API {code}: {message}" if message else f"API {code}"
+    cause = classify_api_code(code)
+    if cause is UnavailableCause.TRANSIENT:
+        raise _RetryableFailure(detail)
+    raise ArrivalUnavailableError(detail, cause)
+
+
 def _raise_for_json_error(body: str) -> None:
     """인증키 오류 등은 XML을 요청해도 JSON 본문({"code": "INFO-100", ...})으로 온다."""
     try:
@@ -49,9 +90,7 @@ def _raise_for_json_error(body: str) -> None:
     if isinstance(payload, dict):
         error = payload.get("errorMessage", payload)
         if isinstance(error, dict) and error.get("code"):
-            raise ArrivalUnavailableError(
-                f"도착 정보 API 오류 {error['code']}: {error.get('message', '')}".rstrip()
-            )
+            _raise_api_error(str(error["code"]), str(error.get("message", "")))
 
 
 def _parse_rows(body: str) -> list[_Row]:
@@ -59,15 +98,20 @@ def _parse_rows(body: str) -> list[_Row]:
         root = ET.fromstring(body)
     except ET.ParseError as e:
         _raise_for_json_error(body)
-        raise ArrivalUnavailableError("도착 정보 API 응답을 해석할 수 없습니다.") from e
+        # 점검 페이지(HTML) 등. 시간이 지나면 풀릴 수 있지만, 같은 요청을 곧바로 다시 보내지는 않는다.
+        raise ArrivalUnavailableError(
+            "unparseable API response", UnavailableCause.TRANSIENT
+        ) from e
 
-    # 이 API는 오류도 HTTP 200 + 본문의 RESULT 코드로 알린다 (예: INFO-200 데이터 없음, INFO-100 인증키 오류).
     results = [root] if root.tag == "RESULT" else list(root.iter("RESULT"))
     for result in results:
         code = (_text(result, "code") or "").strip()
         if code and code != _OK_CODE:
-            message = (_text(result, "message") or "").strip()
-            raise ArrivalUnavailableError(f"도착 정보 API 오류 {code}: {message}")
+            _raise_api_error(code, (_text(result, "message") or "").strip())
+
+    # XML이지만 이 API의 형식이 아니면(점검 페이지 등) "열차 없음"으로 오인하지 않는다.
+    if root.tag != "realtimeStationArrival":
+        raise ArrivalUnavailableError(f"unexpected response root <{root.tag}>", UnavailableCause.TRANSIENT)
 
     return [
         _Row(_text(row, "subwayId"), _text(row, "updnLine"), _text(row, "barvlDt"))
@@ -103,10 +147,6 @@ class RetryPolicy:
         return self.base_delay * 2 ** (attempt - 1) + jitter * self.max_jitter
 
 
-class _RetryableFailure(Exception):
-    """다시 시도할 만한 일시적 실패 (타임아웃, 연결 실패, 5xx, 429)."""
-
-
 class SeoulArrivalClient:
     def __init__(
         self,
@@ -136,17 +176,10 @@ class SeoulArrivalClient:
             raise InvalidInputError(f"지원하지 않는 호선입니다: {line}")
         normalized_dir = resolve_direction(direction, line)
 
-        body = self._fetch(self._url(station))
-        try:
-            rows = _parse_rows(body)
-            if not rows:
-                raise ArrivalUnavailableError(f"'{station}'의 실시간 도착 정보가 비어 있습니다.")
-        except ArrivalUnavailableError as e:
-            logger.warning(
-                "seoul arrival API response unusable (not retryable) station=%s line=%s: %s",
-                station, line, e,
-            )
-            raise
+        rows = self._fetch_rows(self._url(station))
+        if not rows:
+            logger.warning("seoul arrival API response unusable: no rows station=%s", station)
+            raise ArrivalUnavailableError("no rows", UnavailableCause.NO_TRAINS)
 
         minutes = (
             _seconds_to_minutes_ceil(row.barvl_dt)
@@ -161,9 +194,11 @@ class SeoulArrivalClient:
             station, line, direction, len(rows), live,
         )
         if not live:
-            raise ArrivalUnavailableError(
-                f"'{station}' {line} 방면에 도착 예정인 열차 정보가 없습니다."
+            logger.warning(
+                "seoul arrival API response unusable: no trains station=%s line=%s direction=%s",
+                station, line, direction,
             )
+            raise ArrivalUnavailableError("no trains for line/direction", UnavailableCause.NO_TRAINS)
         return live
 
     def _url(self, station: str) -> str:
@@ -173,10 +208,11 @@ class SeoulArrivalClient:
             f"{quote(normalize_station(station), safe='')}"
         )
 
-    def _fetch(self, url: str) -> str:
+    def _fetch_rows(self, url: str) -> list[_Row]:
         """일시적 실패만 제한된 횟수·시간 안에서 재시도한다.
 
-        4xx(429 제외)와 정상 응답 본문의 오류·빈 결과는 다시 보내도 같으므로 재시도하지 않는다.
+        재시도: 타임아웃, 연결 실패, HTTP 5xx·429, 본문의 서버 오류 코드(ERROR-500·600 등).
+        4xx(429 제외), 그 밖의 본문 오류 코드, 빈 결과는 다시 보내도 같으므로 재시도하지 않는다.
         """
         policy = self._retry
         deadline = self._clock() + policy.total_budget
@@ -187,7 +223,7 @@ class SeoulArrivalClient:
             attempt += 1
             timeout = min(policy.request_timeout, max(deadline - self._clock(), 0.0))
             try:
-                text = self._fetch_once(url, timeout)
+                rows = _parse_rows(self._fetch_once(url, timeout))
             except _RetryableFailure as e:
                 reason = str(e)
                 logger.warning(
@@ -203,7 +239,7 @@ class SeoulArrivalClient:
             else:
                 if attempt > 1:
                     logger.info("seoul arrival API succeeded on attempt %d", attempt)
-                return text
+                return rows
 
             if attempt == policy.max_attempts:
                 break
@@ -217,7 +253,7 @@ class SeoulArrivalClient:
             self._sleep(delay)
 
         raise ArrivalUnavailableError(
-            f"도착 정보 API 호출에 실패했습니다 ({attempt}회 시도, 마지막 사유: {reason})."
+            f"API call failed ({attempt}회 시도, 마지막 사유: {reason})", UnavailableCause.TRANSIENT
         )
 
     def _fetch_once(self, url: str, timeout: float) -> str:
@@ -233,4 +269,4 @@ class SeoulArrivalClient:
             return response.text
         if status == 429 or status >= 500:
             raise _RetryableFailure(f"HTTP {status}")
-        raise ArrivalUnavailableError(f"도착 정보 API가 HTTP {status}로 응답했습니다.")
+        raise ArrivalUnavailableError(f"HTTP {status}", UnavailableCause.PERMANENT)

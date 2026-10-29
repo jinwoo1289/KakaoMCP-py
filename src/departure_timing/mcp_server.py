@@ -7,7 +7,7 @@
 - 없는 도구 → 프로토콜 오류 JSON-RPC -32602
   (SDK 기본 동작은 isError 결과라서 규격에 맞게 바꾼다)
 - 스키마 위반(필수값 누락, 타입 오류)과 도메인 입력 오류 → 도구 실행 오류 isError, "[입력 오류] ..."
-- 외부 API 실패 → 도구 실행 오류 isError, "[판단 불가] ..."
+- 외부 API 실패 → 도구 실행 오류 isError, "[판단 불가] ..." (원인별 고정 문구: 일시적/영구/열차 없음)
 """
 
 import logging
@@ -66,13 +66,16 @@ class DepartureMCPServer(MCPServer):
             cause = exc.__cause__
             if isinstance(cause, InvalidInputError):
                 text = f"{INPUT_ERROR_PREFIX} {cause}"
+                logger.warning("MCP tool %s failed: %s", name, text)
             elif isinstance(cause, ValidationError):
                 text = f"{INPUT_ERROR_PREFIX} {_validation_message(cause)}"
+                logger.warning("MCP tool %s failed: %s", name, text)
             elif isinstance(cause, ArrivalUnavailableError):
-                text = f"{UNAVAILABLE_PREFIX} {cause} 잠시 후 다시 시도해 주세요."
+                # 세부 사유(오류 코드·외부 API 원문)는 로그에만 남기고, 결과에는 원인별 고정 문구만 쓴다.
+                text = f"{UNAVAILABLE_PREFIX} {cause.public_message}"
+                logger.warning("MCP tool %s arrival unavailable (%s): %s", name, cause.cause.value, cause)
             else:
                 raise
-            logger.warning("MCP tool %s failed: %s", name, text)
             return _error_result(text)
 
 
@@ -107,6 +110,7 @@ def create_mcp_server(get_service: Callable[[], DepartureTimingService]) -> Depa
             decision=result.decision,
             recommended_departure_time=result.recommended_departure_time,
             reason=result.reason,
+            recheck_after_minutes=result.recheck_after_minutes,
         )
 
     @server.tool(

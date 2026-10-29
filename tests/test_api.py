@@ -6,13 +6,13 @@ from fastapi.testclient import TestClient
 
 from departure_timing.api import create_app
 from departure_timing.clients import SeoulArrivalClient, StubArrivalClient
-from departure_timing.errors import ArrivalUnavailableError
+from departure_timing.errors import ArrivalUnavailableError, UnavailableCause
 from departure_timing.service import DepartureTimingService
 
 
 class FailingArrivalClient:
     def get_remaining_minutes(self, station, line, direction):
-        raise ArrivalUnavailableError("도착 정보 API에 연결하지 못했습니다.")
+        raise ArrivalUnavailableError("connection error", UnavailableCause.TRANSIENT)
 
 
 @pytest.fixture
@@ -47,6 +47,7 @@ def test_assess_returns_camel_case_decision(api):
         "decision": "WAIT",
         "recommendedDepartureTime": "08:35",
         "reason": "지금 출발하면 역에서 약 5분 대기합니다. 08:35에 출발을 추천합니다.",
+        "recheckAfterMinutes": None,
     }
 
 
@@ -116,8 +117,11 @@ def test_arrival_unavailable_is_502():
     api = TestClient(create_app(DepartureTimingService(FailingArrivalClient())))
     res = api.post("/departure/assess", json=ASSESS)
     assert res.status_code == 502
-    assert res.json()["error"] == "ARRIVAL_UNAVAILABLE"
-    assert "decision" not in res.json()
+    assert res.json() == {
+        "error": "ARRIVAL_UNAVAILABLE",
+        "message": "실시간 정보 서버가 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+        "retryable": True,
+    }
 
 
 def test_retries_exhausted_end_to_end_is_502():
@@ -135,7 +139,8 @@ def test_retries_exhausted_end_to_end_is_502():
 
     res = api.post("/departure/assess", json=ASSESS)
     assert res.status_code == 502
-    assert "3회 시도" in res.json()["message"]
+    assert res.json()["message"] == "실시간 정보 서버가 응답하지 않습니다. 잠시 후 다시 시도해 주세요."
+    assert res.json()["retryable"] is True
     assert attempts == 3
 
 
@@ -175,3 +180,53 @@ def test_omitted_direction_is_400(api):
     assert res.json()["message"] == (
         "방향(direction)이 필요합니다. 1호선은 방향을 상행 또는 하행으로 입력해 주세요."
     )
+
+
+
+def test_too_late_includes_recheck_after_minutes(api, stub_client):
+    stub_client.arrivals = [2, 3]
+    body = api.post("/departure/assess", json=ASSESS).json()
+    assert body["decision"] == "TOO_LATE"
+    assert body["recheckAfterMinutes"] == 2
+
+
+def seoul_api(text: str) -> TestClient:
+    client = SeoulArrivalClient(
+        "secret-key", httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=text))),
+        sleep=lambda _: None,
+    )
+    return TestClient(create_app(DepartureTimingService(client)))
+
+
+@pytest.mark.parametrize(
+    ("text", "message", "retryable"),
+    [
+        (
+            '{"status":500,"code":"INFO-100","message":"인증키가 유효하지 않습니다.","total":0}',
+            "실시간 정보 서비스 설정 문제로 조회할 수 없습니다. 다시 시도해도 해결되지 않습니다.",
+            False,
+        ),
+        (
+            "<RESULT><code>ERROR-500</code><message>서버 오류입니다.</message></RESULT>",
+            "실시간 정보 서버가 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+            True,
+        ),
+        (
+            "<realtimeStationArrival><RESULT><code>INFO-000</code></RESULT></realtimeStationArrival>",
+            "현재 운행 중인 열차 정보가 없습니다.",
+            False,
+        ),
+    ],
+    ids=["permanent-key-error", "transient-server-error", "no-trains"],
+)
+def test_unavailable_causes_are_502_with_retryable(text, message, retryable, caplog):
+    res = seoul_api(text).post("/departure/assess", json=ASSESS)
+    assert res.status_code == 502
+    assert res.json() == {"error": "ARRIVAL_UNAVAILABLE", "message": message, "retryable": retryable}
+
+
+def test_key_error_details_stay_in_logs_not_response(caplog):
+    text = '{"status":500,"code":"INFO-100","message":"인증키가 유효하지 않습니다.","total":0}'
+    res = seoul_api(text).post("/departure/assess", json=ASSESS)
+    assert "INFO-100" not in res.text and "인증키" not in res.text
+    assert any("INFO-100" in r.getMessage() for r in caplog.records)

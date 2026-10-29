@@ -6,7 +6,8 @@ import httpx
 import pytest
 
 from departure_timing.clients import SeoulArrivalClient
-from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
+from departure_timing.clients.seoul import classify_api_code
+from departure_timing.errors import ArrivalUnavailableError, InvalidInputError, UnavailableCause
 
 OK_RESULT = "<RESULT><code>INFO-000</code><message>정상 처리되었습니다.</message></RESULT>"
 
@@ -151,3 +152,59 @@ def test_transport_failure_raises_unavailable(error):
 
     with pytest.raises(ArrivalUnavailableError):
         client_with(handler).get_remaining_minutes("서울역", "1호선", "상행")
+
+
+
+# --- 판단 불가 원인 분류 ---
+
+T, P, N = UnavailableCause.TRANSIENT, UnavailableCause.PERMANENT, UnavailableCause.NO_TRAINS
+
+
+@pytest.mark.parametrize(
+    ("code", "cause"),
+    [
+        ("ERROR-500", T), ("ERROR-600", T),
+        ("INFO-100", P), ("INFO-300", P), ("INFO-400", P), ("ERROR-300", P), ("ERROR-301", P),
+        ("ERROR-310", P), ("ERROR-334", P), ("ERROR-336", P), ("ERROR-337", P), ("ERROR-404", P),
+        ("ERROR-601", P),
+        ("INFO-200", N),
+        ("ERROR-599", T), ("ERROR-650", T),  # 표에 없는 서버 측 코드
+        ("INFO-999", P), ("ERROR-999", P),  # 표에 없는 그 밖의 코드
+    ],
+)
+def test_classify_api_code(code, cause):
+    assert classify_api_code(code) is cause
+
+
+def unavailable(text: str) -> ArrivalUnavailableError:
+    with pytest.raises(ArrivalUnavailableError) as excinfo:
+        client_with(responding(text)).get_remaining_minutes("서울역", "1호선", "상행")
+    return excinfo.value
+
+
+@pytest.mark.parametrize(
+    ("text", "cause"),
+    [
+        ('{"status":500,"code":"INFO-100","message":"인증키가 유효하지 않습니다.","total":0}', P),
+        ("<RESULT><code>ERROR-337</code><message>일별 트래픽 제한</message></RESULT>", P),
+        ("<RESULT><code>INFO-200</code><message>해당하는 데이터가 없습니다.</message></RESULT>", N),
+        (body(), N),                          # row 없음
+        (body(row("1002", "상행", "120")), N),  # 해당 호선 열차 없음
+        ("<html>점검 중</html>", T),
+    ],
+    ids=["info-100-json", "error-337", "info-200", "no-rows", "no-matching-line", "maintenance-page"],
+)
+def test_unavailable_cause_from_response(text, cause):
+    error = unavailable(text)
+    assert error.cause is cause
+    assert error.retryable is (cause is T)
+
+
+def test_http_4xx_is_permanent():
+    assert unavailable_status(404).cause is UnavailableCause.PERMANENT
+
+
+def unavailable_status(status: int) -> ArrivalUnavailableError:
+    with pytest.raises(ArrivalUnavailableError) as excinfo:
+        client_with(responding("", status)).get_remaining_minutes("서울역", "1호선", "상행")
+    return excinfo.value

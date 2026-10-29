@@ -32,12 +32,13 @@ from departure_timing.schemas import (
     HealthResponse,
     SavePresetRequest,
     SavePresetResponse,
+    UnavailableErrorResponse,
 )
 from departure_timing.service import DepartureTimingService
 
 KST = ZoneInfo("Asia/Seoul")
 MCP_PATH = "/mcp"
-ERROR_RESPONSES = {400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}}
+ERROR_RESPONSES = {400: {"model": ErrorResponse}, 502: {"model": UnavailableErrorResponse}}
 
 
 def kst_now() -> time:
@@ -55,8 +56,8 @@ def _configure_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def _error(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"error": code, "message": message})
+def _error(status: int, code: str, message: str, **extra: object) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": code, "message": message, **extra})
 
 
 def _validation_message(exc: RequestValidationError) -> str:
@@ -154,7 +155,8 @@ def create_app(
 
     @app.exception_handler(ArrivalUnavailableError)
     async def arrival_unavailable(request: Request, exc: ArrivalUnavailableError) -> JSONResponse:
-        return _error(502, "ARRIVAL_UNAVAILABLE", f"판단할 수 없습니다: {exc}")
+        # 세부 사유(오류 코드·외부 API 원문)는 클라이언트 로그에만 남기고 응답에는 고정 문구만 쓴다.
+        return _error(502, "ARRIVAL_UNAVAILABLE", exc.public_message, retryable=exc.retryable)
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -171,6 +173,7 @@ def create_app(
             decision=result.decision,
             recommended_departure_time=result.recommended_departure_time,
             reason=result.reason,
+            recheck_after_minutes=result.recheck_after_minutes,
         )
 
     @app.post("/presets", response_model=SavePresetResponse, responses={400: {"model": ErrorResponse}})

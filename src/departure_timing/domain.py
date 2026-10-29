@@ -26,6 +26,8 @@ class AssessResult:
     decision: Decision
     recommended_departure_time: str | None
     reason: str
+    # TOO_LATE일 때만: 도착 목록의 첫 열차가 도착하기까지 남은 분. 그 뒤에 목록이 갱신된다.
+    recheck_after_minutes: int | None = None
 
 
 @dataclass(frozen=True)
