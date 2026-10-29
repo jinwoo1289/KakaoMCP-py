@@ -50,10 +50,34 @@ def test_keeps_at_most_five_sorted_arrivals():
     assert client.get_remaining_minutes("서울", "1", None) == [1, 2, 3, 7, 8]
 
 
-def test_line2_ignores_up_down_direction_but_honors_inner_outer():
+def test_line2_filters_by_inner_outer_direction():
     client = client_with(responding(body(row("1002", "내선", "120"), row("1002", "외선", "240"))))
-    assert client.get_remaining_minutes("신대방", "2호선", "상행") == [2, 4]
     assert client.get_remaining_minutes("신대방", "2호선", "외선") == [4]
+    assert client.get_remaining_minutes("신대방", "2호선", "내선") == [2]
+
+
+def test_omitted_direction_uses_both_directions():
+    # 방향을 생략한 경우만 필터 없이 양방향 열차를 함께 본다 (Java와 같음).
+    client = client_with(responding(body(row("1002", "내선", "120"), row("1002", "외선", "240"))))
+    assert client.get_remaining_minutes("신대방", "2호선", None) == [2, 4]
+
+
+@pytest.mark.parametrize(
+    ("line", "direction"),
+    [("2호선", "상행"), ("2호선", "왼쪽"), ("7호선", "외선"), ("7호선", "강남 방면")],
+)
+def test_wrong_or_unknown_direction_raises_before_calling_api(line, direction):
+    # Java(및 이 클라이언트의 이전 버전)는 이런 값이면 방향 필터를 조용히 꺼서
+    # 반대 방향 열차까지 섞인 목록을 돌려줬다. 이제는 API를 부르기 전에 입력 오류로 막는다.
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, text=body(row("1002", "내선", "120")))
+
+    with pytest.raises(InvalidInputError):
+        client_with(handler).get_remaining_minutes("신대방", line, direction)
+    assert requests == []
 
 
 def test_request_url_uses_normalized_station():

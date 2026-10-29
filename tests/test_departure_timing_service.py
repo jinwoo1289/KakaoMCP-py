@@ -206,3 +206,25 @@ def test_direction_matching_line_is_assessed(service, stub_client, line, directi
     res = service.assess(request(4, line=line, direction=direction))
     assert res.decision is Decision.WAIT
     assert stub_client.calls == [("서울역", line, direction)]  # 변환 없이 그대로 전달
+
+
+@pytest.mark.parametrize(
+    ("line", "direction", "hint"),
+    [
+        ("2호선", "왼쪽", "2호선은 방향을 내선 또는 외선으로 입력해 주세요."),
+        ("7호선", "강남 방면", "7호선은 방향을 상행 또는 하행으로 입력해 주세요."),
+        ("7호선", "inner", "7호선은 방향을 상행 또는 하행으로 입력해 주세요."),
+    ],
+)
+def test_unknown_direction_is_invalid(service, stub_client, line, direction, hint):
+    # Java는 알 수 없는 방향이면 필터를 조용히 꺼서 양방향 열차를 섞어 판단했다.
+    stub_client.arrivals = [10]
+    with pytest.raises(InvalidInputError) as excinfo:
+        service.assess(request(4, line=line, direction=direction))
+    assert str(excinfo.value) == f"알 수 없는 방향입니다: {direction}. {hint}"
+    assert stub_client.calls == []
+
+
+def test_blank_direction_is_treated_as_omitted(service, stub_client):
+    stub_client.arrivals = [10]
+    assert service.assess(request(4, line="7호선", direction="  ")).decision is Decision.WAIT

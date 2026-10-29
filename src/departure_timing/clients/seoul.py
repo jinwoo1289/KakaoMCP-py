@@ -18,7 +18,7 @@ from urllib.parse import quote
 import httpx
 
 from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
-from departure_timing.lines import normalize_direction, normalize_station, subway_id_for
+from departure_timing.lines import normalize_station, resolve_direction, subway_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,7 @@ class SeoulArrivalClient:
             raise InvalidInputError("station(역 이름)을 입력해 주세요.")
         if target_subway_id is None:
             raise InvalidInputError(f"지원하지 않는 호선입니다: {line}")
+        normalized_dir = resolve_direction(direction, line)
 
         body = self._fetch(self._url(station))
         try:
@@ -147,7 +148,6 @@ class SeoulArrivalClient:
             )
             raise
 
-        normalized_dir = normalize_direction(direction, line)
         minutes = (
             _seconds_to_minutes_ceil(row.barvl_dt)
             for row in rows

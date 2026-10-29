@@ -139,9 +139,10 @@ async def test_integral_float_minutes_are_accepted(mcp):
         ("assess_departure_timing", {**ASSESS, "estimatedTimeToStation": 7.5}, "정수"),
         ("assess_departure_timing", {**ASSESS, "line": "2호선", "direction": "상행"}, "내선 또는 외선"),
         ("assess_departure_timing", {**ASSESS, "line": "7호선", "direction": "외선"}, "상행 또는 하행"),
+        ("assess_departure_timing", {**ASSESS, "direction": "왼쪽"}, "알 수 없는 방향"),
         ("save_preset", {"presetName": "home", "estimatedTimeToStation": -1}, "1분 이상"),
     ],
-    ids=["unknown-line", "unknown-preset", "zero-minutes", "blank-station", "fractional", "line2-up", "line7-outer", "preset-minutes"],
+    ids=["unknown-line", "unknown-preset", "zero-minutes", "blank-station", "fractional", "line2-up", "line7-outer", "unknown-direction", "preset-minutes"],
 )
 async def test_domain_input_errors_are_tool_errors(mcp, tool, arguments, reason):
     result = await mcp.call_tool(tool, arguments)

@@ -16,7 +16,7 @@ from departure_timing.domain import (
     SavePresetResult,
 )
 from departure_timing.errors import ArrivalUnavailableError, InvalidInputError
-from departure_timing.lines import direction_mismatch, subway_id_for
+from departure_timing.lines import resolve_direction, subway_id_for
 
 BUFFER_MINUTES = 1
 
@@ -51,10 +51,8 @@ class DepartureTimingService:
             raise InvalidInputError("line(호선)을 입력해 주세요.")
         if subway_id_for(request.line) is None:
             raise InvalidInputError(f"지원하지 않는 호선입니다: {request.line}")
-        # 호선과 맞지 않는 방향은 클라이언트가 방향 필터를 끄고 양방향 열차를 섞어 판단하게 되므로 막는다.
-        mismatch = direction_mismatch(request.direction, request.line)
-        if mismatch:
-            raise InvalidInputError(mismatch)
+        # 호선과 맞지 않거나 알 수 없는 방향을 그대로 두면 반대 방향 열차가 섞인 판단이 나가므로 막는다.
+        resolve_direction(request.direction, request.line)
         estimated = self._resolve_estimated_time(request)
 
         arrivals = self._arrival_client.get_remaining_minutes(

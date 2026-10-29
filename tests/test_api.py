@@ -154,3 +154,9 @@ def test_direction_not_matching_line_is_400(api):
         "error": "INVALID_INPUT",
         "message": "2호선은 방향을 내선 또는 외선으로 입력해 주세요.",
     }
+
+
+def test_unknown_direction_is_400(api):
+    res = api.post("/departure/assess", json={**ASSESS, "direction": "왼쪽"})
+    assert res.status_code == 400
+    assert res.json()["message"].startswith("알 수 없는 방향입니다: 왼쪽.")
