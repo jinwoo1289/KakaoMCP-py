@@ -4,6 +4,7 @@ Java 버전은 실패하면 가짜 도착 정보 [2, 5, 8, 11, 14]를 돌려줬�
 여기서는 도착 정보를 얻지 못하면 ArrivalUnavailableError를 던진다.
 """
 
+import json
 import logging
 import math
 import random
@@ -39,10 +40,25 @@ def _text(element: ET.Element, tag: str) -> str | None:
     return child.text if child is not None else None
 
 
+def _raise_for_json_error(body: str) -> None:
+    """인증키 오류 등은 XML을 요청해도 JSON 본문({"code": "INFO-100", ...})으로 온다."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return
+    if isinstance(payload, dict):
+        error = payload.get("errorMessage", payload)
+        if isinstance(error, dict) and error.get("code"):
+            raise ArrivalUnavailableError(
+                f"도착 정보 API 오류 {error['code']}: {error.get('message', '')}".rstrip()
+            )
+
+
 def _parse_rows(body: str) -> list[_Row]:
     try:
         root = ET.fromstring(body)
     except ET.ParseError as e:
+        _raise_for_json_error(body)
         raise ArrivalUnavailableError("도착 정보 API 응답을 해석할 수 없습니다.") from e
 
     # 이 API는 오류도 HTTP 200 + 본문의 RESULT 코드로 알린다 (예: INFO-200 데이터 없음, INFO-100 인증키 오류).
@@ -119,9 +135,17 @@ class SeoulArrivalClient:
         if target_subway_id is None:
             raise InvalidInputError(f"지원하지 않는 호선입니다: {line}")
 
-        rows = _parse_rows(self._fetch(self._url(station)))
-        if not rows:
-            raise ArrivalUnavailableError(f"'{station}'의 실시간 도착 정보가 비어 있습니다.")
+        body = self._fetch(self._url(station))
+        try:
+            rows = _parse_rows(body)
+            if not rows:
+                raise ArrivalUnavailableError(f"'{station}'의 실시간 도착 정보가 비어 있습니다.")
+        except ArrivalUnavailableError as e:
+            logger.warning(
+                "seoul arrival API response unusable (not retryable) station=%s line=%s: %s",
+                station, line, e,
+            )
+            raise
 
         normalized_dir = normalize_direction(direction, line)
         minutes = (

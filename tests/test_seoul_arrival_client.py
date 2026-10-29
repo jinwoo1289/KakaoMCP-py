@@ -96,6 +96,19 @@ def test_empty_or_error_response_raises_unavailable(text):
         client_with(responding(text)).get_remaining_minutes("서울역", "1호선", None)
 
 
+def test_json_error_body_reports_api_error_code():
+    # 실제 API는 키가 틀리면 XML 경로로 요청해도 HTTP 200 + JSON 오류 본문을 준다.
+    text = '{"status":500,"code":"INFO-100","message":"인증키가 유효하지 않습니다.","total":0}'
+    with pytest.raises(ArrivalUnavailableError, match="INFO-100"):
+        client_with(responding(text)).get_remaining_minutes("서울역", "1호선", None)
+
+
+def test_unusable_response_is_logged(caplog):
+    with pytest.raises(ArrivalUnavailableError):
+        client_with(responding(body())).get_remaining_minutes("서울역", "1호선", None)
+    assert any("response unusable" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.parametrize("status", [400, 403, 500, 503])
 def test_non_200_raises_unavailable(status):
     with pytest.raises(ArrivalUnavailableError, match=str(status)):

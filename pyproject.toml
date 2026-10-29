@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "지하철 실시간 도착 정보로 언제 출발할지 판단하는 서비스 (KakaoMCP Python 재구현)"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.27"]
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "uvicorn>=0.30",
+    "tzdata",  # zoneinfo(Asia/Seoul)용. 시스템 시간대 DB가 없는 Windows·slim 이미지 대비
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

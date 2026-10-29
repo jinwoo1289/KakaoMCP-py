@@ -3,11 +3,97 @@
 [KakaoMCP](https://github.com/jinwoo1289/KakaoMCP)(Java/Spring)를 Python으로 다시 구현한 프로젝트입니다.
 역까지의 이동 시간과 실시간 도착 정보로 **지금 나갈지(GO_NOW), 언제 나갈지(WAIT), 이미 늦었는지(TOO_LATE)** 를 판단합니다.
 
-## 테스트
+현재는 REST API만 제공합니다. MCP 엔드포인트는 다음 단계에서 공식 MCP Python SDK로 추가할 예정입니다.
+
+## 실행
+
+Python 3.12 이상과 [서울 열린데이터광장](https://data.seoul.go.kr/) 실시간 지하철 도착정보 API 키가 필요합니다.
 
 ```bash
 pip install -e ".[dev]"
+export SEOUL_SUBWAY_APIKEY=발급받은_키
+uvicorn departure_timing.api:create_app --factory --port 8000
+```
+
+Docker:
+
+```bash
+docker build -t departure-timing .
+docker run --rm -p 8000:8000 -e SEOUL_SUBWAY_APIKEY=발급받은_키 departure-timing
+```
+
+| 환경변수 | 필수 | 설명 |
+|---|---|---|
+| `SEOUL_SUBWAY_APIKEY` | 예 | 서울시 실시간 도착 API 키. 없으면 서버가 기동하지 않습니다. |
+| `SEOUL_SUBWAY_BASE_URL` | 아니오 | 기본값 `http://swopenAPI.seoul.go.kr/api/subway` |
+
+- 프리셋은 프로세스 메모리에 저장됩니다(Java 버전과 같음). 재시작하면 사라지며, 워커를 여러 개 띄우면 워커끼리 공유되지 않으므로 워커는 1개로 실행하세요.
+- `currentTime`이 없으면 서버 시간대와 상관없이 한국 시각(Asia/Seoul)을 기준으로 계산합니다.
+- API 문서: 서버 실행 후 `http://localhost:8000/docs`
+
+## 테스트
+
+```bash
 pytest
+```
+
+외부 API를 실제로 호출하는 테스트는 없습니다. 서울시 API 응답은 `httpx.MockTransport`로 대체합니다.
+
+## API 예시
+
+### `GET /health`
+
+```bash
+curl http://localhost:8000/health
+# {"status":"ok"}
+```
+
+### `POST /presets` — 이동 시간 저장
+
+```bash
+curl -X POST http://localhost:8000/presets \
+  -H 'Content-Type: application/json' \
+  -d '{"presetName": "home", "estimatedTimeToStation": 10}'
+# 200 {"success":true,"message":"프리셋 'home' 저장 완료"}
+```
+
+### `POST /departure/assess` — 출발 시점 판단
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `station` | string | 역 이름 (필수, 예: `신대방역`) |
+| `line` | string | 호선 (필수, 예: `2호선`, `2`, `신분당선`) |
+| `direction` | string | `상행`/`하행` (2호선은 `내선`/`외선`, 생략 가능) |
+| `estimatedTimeToStation` | int | 역까지 이동 시간(분) |
+| `presetName` | string | 저장된 프리셋. 있으면 `estimatedTimeToStation`보다 우선 |
+| `currentTime` | `HH:mm` | 현재 시각 (생략하면 서버의 한국 시각) |
+
+```bash
+curl -X POST http://localhost:8000/departure/assess \
+  -H 'Content-Type: application/json' \
+  -d '{"station": "신대방역", "line": "2호선", "direction": "내선", "presetName": "home"}'
+```
+
+```json
+{"decision": "WAIT", "recommendedDepartureTime": "08:35", "reason": "지금 출발하면 역에서 약 5분 대기합니다. 08:35에 출발을 추천합니다."}
+```
+
+| `decision` | 의미 | `recommendedDepartureTime` |
+|---|---|---|
+| `GO_NOW` | 지금 출발하면 대기 없이 탑승 | `"NOW"` |
+| `WAIT` | 추천 시각에 출발 | `"HH:mm"` |
+| `TOO_LATE` | 도착 예정 열차로는 탑승이 어려움 | `null` |
+
+### 오류 응답
+
+판단할 수 없는 경우에는 판단 결과 대신 오류를 돌려줍니다.
+
+```json
+// 400 입력 오류: 역/호선 누락, 모르는 호선, 이동 시간 누락·0 이하, 없는 프리셋, 잘못된 형식
+{"error": "INVALID_INPUT", "message": "지원하지 않는 호선입니다: 100호선"}
+
+// 502 판단 불가: 외부 API 실패, 빈 응답, API 오류 코드
+{"error": "ARRIVAL_UNAVAILABLE", "message": "판단할 수 없습니다: 도착 정보 API 호출에 실패했습니다 (3회 시도, 마지막 사유: HTTP 503)."}
 ```
 
 ## Java 버전과의 차이
@@ -62,3 +148,14 @@ Java 버전은 재시도 없이 바로 가짜 데이터로 대체했습니다. �
   오래 기다려 받은 답보다 빨리 "판단 불가"를 알리는 편이 낫습니다.
 - **4xx와 빈 응답을 재시도하지 않는 이유:** 다시 보내도 같은 결과가 나오기 때문입니다
   (잘못된 키, 없는 역, 지금 운행하는 열차 없음 등).
+
+### 그 밖의 차이
+
+- **엔드포인트 경로:** `/mcp/assess` → `/departure/assess`, `/mcp/presets` → `/presets`, 상태 확인은 `GET /health`.
+  JSON 필드 이름(camelCase)과 응답 형식은 Java와 같습니다.
+- **API 키 필수:** Java는 키가 없어도 기동한 뒤 가짜 데이터로 응답할 수 있었지만, 이 버전은 키가 없으면 기동하지 않습니다.
+- **API 키 오류 해석:** 서울시 API는 키가 틀리면 XML을 요청해도 JSON 오류 본문을 돌려줍니다.
+  이 경우에도 오류 코드(`INFO-100` 등)를 읽어 `502` 메시지에 담습니다.
+- **기준 시각:** `currentTime`을 생략하면 서버 시간대와 무관하게 한국 시각을 씁니다(Java는 서버 로컬 시각).
+- **MCP:** Java 버전의 직접 구현한 JSON-RPC `/mcp` 엔드포인트는 아직 옮기지 않았습니다.
+  다음 단계에서 공식 MCP Python SDK로 추가할 예정입니다.
