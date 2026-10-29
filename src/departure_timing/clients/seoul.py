@@ -6,8 +6,11 @@ Java 버전은 실패하면 가짜 도착 정보 [2, 5, 8, 11, 14]를 돌려줬�
 
 import logging
 import math
+import random
 import re
+import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -66,18 +69,46 @@ def _seconds_to_minutes_ceil(seconds: str | None) -> int | None:
     return 0 if sec == 0 else math.ceil(sec / 60)
 
 
+@dataclass(frozen=True)
+class RetryPolicy:
+    """도착 정보 조회 재시도 기준.
+
+    조회(GET)라 몇 번을 다시 보내도 결과가 같으므로(멱등) 재시도해도 안전하다.
+    다만 실시간 정보라 오래 기다린 답은 쓸모가 없으므로 전체 시간 예산 안에서만 재시도한다.
+    """
+
+    max_attempts: int = 3
+    base_delay: float = 0.3      # 0.3초, 0.6초, ... (지수 백오프)
+    max_jitter: float = 0.1      # 백오프에 더하는 0 ~ max_jitter초 무작위 지연
+    request_timeout: float = 1.5  # 시도 1회의 httpx 타임아웃 (남은 예산보다 길어지지 않음)
+    total_budget: float = 3.0    # 모든 시도와 대기를 합친 시간 상한
+
+    def backoff(self, attempt: int, jitter: float) -> float:
+        return self.base_delay * 2 ** (attempt - 1) + jitter * self.max_jitter
+
+
+class _RetryableFailure(Exception):
+    """다시 시도할 만한 일시적 실패 (타임아웃, 연결 실패, 5xx, 429)."""
+
+
 class SeoulArrivalClient:
     def __init__(
         self,
         api_key: str,
         http: httpx.Client,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = 2.0,
+        retry: RetryPolicy = RetryPolicy(),
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
         self._api_key = api_key
         self._http = http
         self._base_url = base_url.rstrip("/")
-        self._timeout = timeout
+        self._retry = retry
+        self._sleep = sleep
+        self._clock = clock
+        self._jitter = jitter
 
     def get_remaining_minutes(
         self, station: str | None, line: str | None, direction: str | None
@@ -119,18 +150,63 @@ class SeoulArrivalClient:
         )
 
     def _fetch(self, url: str) -> str:
-        try:
-            response = self._http.get(url, timeout=self._timeout)
-        except httpx.TimeoutException as e:
-            logger.warning("seoul arrival API failed: timeout (%s)", type(e).__name__)
-            raise ArrivalUnavailableError("도착 정보 API 응답 시간이 초과되었습니다.") from e
-        except httpx.TransportError as e:
-            logger.warning("seoul arrival API failed: transport error (%s)", type(e).__name__)
-            raise ArrivalUnavailableError("도착 정보 API에 연결하지 못했습니다.") from e
+        """일시적 실패만 제한된 횟수·시간 안에서 재시도한다.
 
-        if response.status_code != 200:
-            logger.warning("seoul arrival API failed: HTTP %d", response.status_code)
-            raise ArrivalUnavailableError(
-                f"도착 정보 API가 HTTP {response.status_code}로 응답했습니다."
-            )
-        return response.text
+        4xx(429 제외)와 정상 응답 본문의 오류·빈 결과는 다시 보내도 같으므로 재시도하지 않는다.
+        """
+        policy = self._retry
+        deadline = self._clock() + policy.total_budget
+        attempt = 0
+        reason = ""
+
+        while attempt < policy.max_attempts:
+            attempt += 1
+            timeout = min(policy.request_timeout, max(deadline - self._clock(), 0.0))
+            try:
+                text = self._fetch_once(url, timeout)
+            except _RetryableFailure as e:
+                reason = str(e)
+                logger.warning(
+                    "seoul arrival API attempt %d/%d failed: %s",
+                    attempt, policy.max_attempts, reason,
+                )
+            except ArrivalUnavailableError as e:
+                logger.warning(
+                    "seoul arrival API attempt %d/%d failed (not retryable): %s",
+                    attempt, policy.max_attempts, e,
+                )
+                raise
+            else:
+                if attempt > 1:
+                    logger.info("seoul arrival API succeeded on attempt %d", attempt)
+                return text
+
+            if attempt == policy.max_attempts:
+                break
+            delay = policy.backoff(attempt, self._jitter())
+            if self._clock() + delay >= deadline:
+                logger.warning(
+                    "seoul arrival API retry stopped: time budget %.1fs exhausted",
+                    policy.total_budget,
+                )
+                break
+            self._sleep(delay)
+
+        raise ArrivalUnavailableError(
+            f"도착 정보 API 호출에 실패했습니다 ({attempt}회 시도, 마지막 사유: {reason})."
+        )
+
+    def _fetch_once(self, url: str, timeout: float) -> str:
+        try:
+            response = self._http.get(url, timeout=timeout)
+        except httpx.TimeoutException as e:
+            raise _RetryableFailure(f"timeout ({type(e).__name__})") from e
+        except httpx.TransportError as e:
+            raise _RetryableFailure(f"connection error ({type(e).__name__})") from e
+
+        status = response.status_code
+        if status == 200:
+            return response.text
+        if status == 429 or status >= 500:
+            raise _RetryableFailure(f"HTTP {status}")
+        raise ArrivalUnavailableError(f"도착 정보 API가 HTTP {status}로 응답했습니다.")

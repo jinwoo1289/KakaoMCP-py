@@ -23,7 +23,9 @@ def body(*rows: str, result: str = OK_RESULT) -> str:
 
 
 def client_with(handler) -> SeoulArrivalClient:
-    return SeoulArrivalClient("KEY", httpx.Client(transport=httpx.MockTransport(handler)))
+    return SeoulArrivalClient(
+        "KEY", httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda _: None
+    )
 
 
 def responding(text: str, status: int = 200):
