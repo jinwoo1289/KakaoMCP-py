@@ -3,7 +3,7 @@
 [KakaoMCP](https://github.com/jinwoo1289/KakaoMCP)(Java/Spring)를 Python으로 다시 구현한 프로젝트입니다.
 역까지의 이동 시간과 실시간 도착 정보로 **지금 나갈지(GO_NOW), 언제 나갈지(WAIT), 이미 늦었는지(TOO_LATE)** 를 판단합니다.
 
-현재는 REST API만 제공합니다. MCP 엔드포인트는 다음 단계에서 공식 MCP Python SDK로 추가할 예정입니다.
+같은 판단 기능을 REST API와 MCP 서버(공식 MCP Python SDK, Streamable HTTP) 두 가지로 제공합니다.
 
 ## 실행
 
@@ -26,6 +26,7 @@ docker run --rm -p 8000:8000 -e SEOUL_SUBWAY_APIKEY=발급받은_키 departure-t
 |---|---|---|
 | `SEOUL_SUBWAY_APIKEY` | 예 | 서울시 실시간 도착 API 키. 없으면 서버가 기동하지 않습니다. |
 | `SEOUL_SUBWAY_BASE_URL` | 아니오 | 기본값 `http://swopenAPI.seoul.go.kr/api/subway` |
+| `MCP_ALLOWED_HOSTS` | 배포 시 | `/mcp`에 접근을 허용할 Host 목록(쉼표 구분, 예: `mcp.example.com,mcp.example.com:*`). 없으면 localhost만 허용합니다. |
 
 - 프리셋은 프로세스 메모리에 저장됩니다(Java 버전과 같음). 재시작하면 사라지며, 워커를 여러 개 띄우면 워커끼리 공유되지 않으므로 워커는 1개로 실행하세요.
 - `currentTime`이 없으면 서버 시간대와 상관없이 한국 시각(Asia/Seoul)을 기준으로 계산합니다.
@@ -38,6 +39,7 @@ pytest
 ```
 
 외부 API를 실제로 호출하는 테스트는 없습니다. 서울시 API 응답은 `httpx.MockTransport`로 대체합니다.
+MCP 도구는 SDK의 메모리 내 클라이언트(`mcp.client.client.Client`)로 검증하고, `/mcp` HTTP 마운트는 `TestClient`로 확인합니다.
 
 ## API 예시
 
@@ -95,6 +97,80 @@ curl -X POST http://localhost:8000/departure/assess \
 // 502 판단 불가: 외부 API 실패, 빈 응답, API 오류 코드
 {"error": "ARRIVAL_UNAVAILABLE", "message": "판단할 수 없습니다: 도착 정보 API 호출에 실패했습니다 (3회 시도, 마지막 사유: HTTP 503)."}
 ```
+
+## MCP 연결
+
+| 항목 | 값 |
+|---|---|
+| 엔드포인트 | `http://<호스트>:8000/mcp` (`/mcp/`도 같음) |
+| 전송 방식 | Streamable HTTP, stateless, JSON 응답 |
+| 서버 이름 | `departure-timing-mcp` |
+| 프로토콜 버전 | 2024-11-05 ~ 2025-11-25, 2026-07-28 (SDK가 협상) |
+
+- 로컬이 아닌 곳에 배포하면 `MCP_ALLOWED_HOSTS`에 외부 Host를 지정하세요.
+  지정하지 않으면 SDK의 DNS rebinding 보호가 localhost 외 Host를 `421`로 거절합니다(REST는 영향 없음).
+- REST와 MCP는 같은 프리셋 저장소를 씁니다. `POST /presets`로 저장한 프리셋을 MCP 도구에서도 쓸 수 있습니다.
+
+### 도구
+
+이름과 입력 스키마(속성 이름, 타입, 설명, 필수 항목)는 Java 버전과 같습니다.
+
+| 도구 | 입력 | 필수 | 결과 |
+|---|---|---|---|
+| `assess_departure_timing` | `station`, `line`, `estimatedTimeToStation`(number), `direction`, `presetName` | `station`, `line` | `{decision, recommendedDepartureTime, reason}` |
+| `save_preset` | `presetName`, `estimatedTimeToStation`(number) | 둘 다 | `{success, message}` |
+
+결과는 REST 응답과 같은 JSON으로, `structuredContent`와 텍스트(JSON 문자열) 두 형태로 함께 돌려줍니다.
+`estimatedTimeToStation`은 정수 값(`10`, `10.0`)만 받고, `7.5`처럼 소수가 있으면 입력 오류입니다.
+
+### 호출 예시
+
+공식 Python SDK 클라이언트:
+
+```python
+import asyncio
+from mcp.client.client import Client
+
+async def main():
+    async with Client("http://localhost:8000/mcp") as client:
+        await client.call_tool("save_preset", {"presetName": "home", "estimatedTimeToStation": 10})
+        result = await client.call_tool(
+            "assess_departure_timing",
+            {"station": "신대방역", "line": "2호선", "direction": "내선", "presetName": "home"},
+        )
+        print(result.is_error, result.structured_content)
+
+asyncio.run(main())
+```
+
+JSON-RPC로 직접 호출:
+
+```bash
+curl -X POST http://localhost:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"assess_departure_timing","arguments":{"station":"신대방역","line":"2호선","estimatedTimeToStation":10}}}'
+```
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"decision\": \"WAIT\", ...}"}],"structuredContent":{"decision":"WAIT","recommendedDepartureTime":"08:35","reason":"..."},"isError":false}}
+```
+
+### 오류
+
+[MCP 규격](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#error-handling)의
+"Error Handling"(2025-11-25, 2026-07-28 동일) 기준으로 나눕니다.
+
+| 상황 | 종류 | 응답 |
+|---|---|---|
+| 없는 도구 | 프로토콜 오류 | JSON-RPC `error.code = -32602` |
+| 스키마 위반(필수값 누락, 타입 오류) | 도구 실행 오류 | `isError: true`, `"[입력 오류] line: Field required"` |
+| 모르는 호선, 없는 프리셋, 이동 시간 0 이하·소수, 빈 역 이름 | 도구 실행 오류 | `isError: true`, `"[입력 오류] 지원하지 않는 호선입니다: 100호선"` |
+| 외부 API 실패(재시도 후), 빈 응답, API 오류 코드 | 도구 실행 오류 | `isError: true`, `"[판단 불가] … 잠시 후 다시 시도해 주세요."` |
+
+`[입력 오류]`는 인자를 고치면 해결되고, `[판단 불가]`는 같은 인자로 나중에 다시 시도하면 됩니다.
+규격상 도구 실행 오류는 LLM에 그대로 전달되어 스스로 고쳐 다시 시도하는 데 쓰입니다.
 
 ## Java 버전과의 차이
 
@@ -157,5 +233,28 @@ Java 버전은 재시도 없이 바로 가짜 데이터로 대체했습니다. �
 - **API 키 오류 해석:** 서울시 API는 키가 틀리면 XML을 요청해도 JSON 오류 본문을 돌려줍니다.
   이 경우에도 오류 코드(`INFO-100` 등)를 읽어 `502` 메시지에 담습니다.
 - **기준 시각:** `currentTime`을 생략하면 서버 시간대와 무관하게 한국 시각을 씁니다(Java는 서버 로컬 시각).
-- **MCP:** Java 버전의 직접 구현한 JSON-RPC `/mcp` 엔드포인트는 아직 옮기지 않았습니다.
-  다음 단계에서 공식 MCP Python SDK로 추가할 예정입니다.
+
+### MCP: 공식 SDK를 쓰고, 오류를 규격대로 나눕니다
+
+Java 버전은 JSON-RPC를 직접 구현했습니다(`McpRequestDispatcher`). 이 버전은 공식 MCP Python SDK(`mcp` 2.x의 `MCPServer`.
+v1의 `FastMCP`가 v2에서 이름이 바뀐 것)를 쓰고, 프로토콜 버전 협상과 Streamable HTTP 전송은 SDK가 처리합니다.
+도구 이름과 입력 스키마는 Java와 같으므로 기존 클라이언트(PlayMCP 등)가 같은 인자로 호출할 수 있습니다.
+
+| 상황 | Java | Python |
+|---|---|---|
+| 외부 API 실패 | `-32603` Internal error (실제로는 가짜 도착 정보로 판단해 정상 결과) | 도구 실행 오류 `isError` + `[판단 불가]` |
+| 빈 `station` / `line` | `-32602` | 도구 실행 오류 `isError` + `[입력 오류]` |
+| 모르는 호선, 없는 프리셋, 이동 시간 0 이하 | 정상 결과(가짜 데이터로 판단, 또는 `WAIT`) | 도구 실행 오류 `isError` + `[입력 오류]` |
+| 소수 이동 시간(`7.5`) | `intValue()`로 소수점을 버림 | 도구 실행 오류 `isError` + `[입력 오류]` |
+| 없는 도구 | `-32602` | `-32602` (같음) |
+| 도구 결과 | Lombok `toString()` 문자열 | REST와 같은 camelCase JSON + `structuredContent` |
+| 지원 프로토콜 | `2025-06-18` 고정 응답 | SDK가 협상 |
+| 엔드포인트 | `/mcp`, `/mcp/`, `/mcp/mcp` | `/mcp`, `/mcp/` |
+
+- **외부 API 실패를 `-32603`에서 도구 실행 오류로 바꾼 이유:** MCP 규격은 "API failures"를 도구 실행 오류(`isError: true`)로
+  분류합니다. 프로토콜 오류는 요청 구조 자체의 문제(없는 도구, 잘못된 요청 형식)에만 씁니다.
+  도구 실행 오류는 LLM에 전달되므로, 모델이 "잠시 후 다시 시도"처럼 사용자에게 상황을 설명할 수 있습니다.
+- **SDK 기본값에서 바꾼 점:** `mcp` 2.3.0은 없는 도구도 `isError` 결과로 돌려줍니다.
+  규격에 맞추려고 이 경우만 JSON-RPC `-32602`로 냅니다(`DepartureMCPServer.call_tool`).
+  또 SDK는 도구 오류 메시지 앞에 `Error executing tool …:`를 붙이므로, 접두어(`[입력 오류]`, `[판단 불가]`)가
+  맨 앞에 오도록 결과를 직접 만듭니다.
